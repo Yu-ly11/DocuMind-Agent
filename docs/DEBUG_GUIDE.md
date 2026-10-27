@@ -1,55 +1,117 @@
-# DocuMind-Agent: 工业级逆向单步调试实战指南
+# DocuMind-Agent: VS Code 运行与单步调试指南
 
-本指南供你在 VS Code 中通过 **单步断点调试（Step-by-Step Debugging）**，亲眼透视整个 LangGraph 5 节点状态机在面对真实 5,067 字合同时的内部数据流转。
-
----
-
-## 一、断点打在何处？（核心观测点位）
-
-打开项目中的 [`src/graph_agent.py`](../src/graph_agent.py)，在行号左侧单击鼠标左键，打上 **红点（断点）**：
-
-| 节点 / 阶段 | 推荐断点位置 | 核心观察目标与变量 |
-| :--- | :--- | :--- |
-| **Node 1: Task Planner** | `task_planner_node` 方法入口与返回行 | 观察大模型如何将模糊指令拆解为 `state['plan_tasks']` 结构体列表 |
-| **Node 2: Hybrid Retriever** | `hits = self.retriever.retrieve(...)` 之后 | 观察子块是如何高精捕捞、父块是如何完整回溯，以及检索置信度得分 `score` |
-| **Node 3: Penalty Calculator** | `calc_penalty_risk(...)` 执行处 | 观察参数抽取结果与本地 Python 算子出具的 `penalty_cert` 确定性凭据 |
-| **Node 4: Clause Evaluator** | `self.retriever.get_chunk_location(...)` 之后 | 观察**真实物理行号**是如何硬编码绑定到 `issue_dict['evidence']` 中的 |
-| **Node 5: Critic 反思检验** | `critic_node` 的 `is_grounded` 判断处 | 观察可溯源性检验逻辑是否真实在合同全文中检索匹配摘录，观察是否触发重试 |
-| **Router 条件路由** | `critic_decision` 函数入口 | 观察当前状态决定走向 `hybrid_retriever`（循环重试）还是 `report_aggregator` |
+面向本项目在 VS Code 中的**日常运行**与**断点调试**。所有命令均在项目根目录 `DocuMind-Agent/` 下执行。
 
 ---
 
-## 二、如何启动 VS Code 调试？
+## 一、一次性准备（3 步，只需做一次）
 
-1. 在 VS Code 中打开 [`src/graph_agent.py`](../src/graph_agent.py)；
-2. 按键盘快捷键 **`F5`**（或点击左侧导航栏的“运行和调试”小虫子图标 ➡️ 点击“运行和调试”）；
-3. 选择 **`Python 调试程序: 当前文件`**；
-4. 程序启动后，会在第一个断点处自动暂停（高亮显示黄色箭头）。
-
----
-
-## 三、调试时按键操作技巧
-
-- **F10（单步跳过）**：执行当前行，停在下一行代码；
-- **F11（单步进入）**：如果当前行是一个函数调用（如调用了 `retriever.retrieve`），按 F11 会钻进函数内部查看执行细节；
-- **Shift + F11（单步跳出）**：退出当前子函数，返回上一层；
-- **F5（继续执行）**：一直运行直到下一个断点。
+1. **选择解释器**：`Ctrl+Shift+P` → `Python: Select Interpreter` → 选 `.\venv\Scripts\python.exe`
+   （仓库的 `.vscode/settings.json` 已把默认解释器指向它，若仍提示找不到模块，就是这步没生效。）
+2. **准备密钥**：确认根目录存在 `.env`；没有则 `Copy-Item .env.example .env` 后填入 `OPENAI_API_KEY`。
+3. **打开终端**：`Ctrl+`` 打开集成终端，应看到提示符前带 `(.venv)`。
 
 ---
 
-## 四、调试控制台（Debug Console）实时查验技巧
+## 二、三种启动方式
 
-当程序停在断点处时，点击 VS Code 底部的 **调试控制台（Debug Console）** 标签页，你可以直接在输入框敲入 Python 表达式查看实时变量：
+### 方式 A：终端直接跑（最快，日常用这个）
+
+```powershell
+# 1) 交互式工作台（审计报告 + Copilot 问答）
+streamlit run app.py
+# 浏览器打开 http://localhost:8501
+
+# 2) FastAPI 微服务
+uvicorn src.api:app --host 127.0.0.1 --port 8000
+# 文档 http://127.0.0.1:8000/docs
+```
+
+终端里 `Ctrl+C` 停止服务。
+
+### 方式 B：F5 断点调试（仓库已内置 `.vscode/launch.json`）
+
+`Ctrl+Shift+D` 打开「运行和调试」→ 顶部下拉框选择配置 → `F5`：
+
+| 配置 | 作用 |
+| --- | --- |
+| ① Streamlit 工作台 (app.py) | 调试 UI 与两条业务链路，断点会真实命中 |
+| ② FastAPI 微服务 (src/api.py) | 调试接口与 SSE 事件流 |
+| ③ 证据链 Δ=0 测试 | 单步看 `get_chunk_location` 如何反查物理行号 |
+| ④ PDF 解析 / 扫描件熔断测试 | 看表格还原、页眉剔除与 OCR 降级 |
+| ⑤ API 端点测试 | 调试上传 → 解析 → 报告链路 |
+| ⑥ 检索消融实验 | 单步看 BM25 / 向量 / RRF / 精排四路融合 |
+| ⑦ 算法手撕自测（免密钥） | 不联网验证 RRF、父子块、Critic 路由 |
+| ⑧ 调试当前 Python 文件 | 临时脚本用 |
+
+> 若提示 `Configured debug type 'debugpy' is not supported`，把 `launch.json` 里的 `"type": "debugpy"` 全部换成 `"type": "python"`（旧版 Python 扩展）。
+
+### 方式 C：只跑测试验证环境
+
+```powershell
+python training/practice_exam.py     # 免密钥，纯算法断言
+python tests/test_evidence_anchor.py # 证据坐标 + Fail-Closed（需 Embedding 密钥）
+python tests/test_pdf_parser.py
+python tests/test_api.py
+python tests/eval_benchmark.py       # 检索消融，输出 Hit@k / NDCG / MRR
+```
+
+---
+
+## 三、断点打在何处（核心观测点）
+
+打开 `src/graph_agent.py`，按行号在左侧单击打红点：
+
+| 节点 | 推荐断点 | 观察目标 |
+| --- | --- | --- |
+| Node 1 Task Planner | `task_planner_node`（约 L77） | `state["plan_tasks"]` 如何被拆成多个审查议题 |
+| Node 2 Hybrid Retriever | `retrieve(...)` 之后（约 L135） | 召回条数、`score`、父块是否正确回填 |
+| Node 3 Penalty Calculator | `calc_penalty_risk(...)`（约 L194） | 参数抽取结果与本地算子出具的 `penalty_cert` |
+| Node 4 Clause Evaluator | `get_chunk_location(...)` 之后（约 L262） | 物理行号/页码如何写入 `issue["evidence"]` |
+| Node 5 Critic | `is_grounded = ...`（约 L311） | 证据是否真的在原文中出现；何时触发重试 |
+| 条件路由 | `critic_decision`（约 L545） | 走向 `hybrid_retriever`（循环）还是 `report_aggregator` |
+| Node 6 Report Aggregator | `report_aggregator_node`（约 L404） | 安全闸门如何把未闭环项抬成"至少中风险" |
+
+行号会随代码改动漂移，以函数名为准（`Ctrl+F` 搜函数名更快）。
+
+---
+
+## 四、调试快捷键
+
+- `F10` 单步跳过 · `F11` 单步进入 · `Shift+F11` 跳出 · `F5` 继续到下一个断点
+- `Ctrl+Shift+F5` 重启调试 · `Shift+F5` 停止
+
+## 五、Debug Console 常用表达式
+
+停在断点时，在底部「调试控制台」直接输入：
 
 ```python
-# 1. 查看任务规划列表
-state["plan_tasks"]
+state["plan_tasks"]                         # 议题拆解结果
+state["retrieved_clauses"][0]["score"]      # 当前 Top1 检索得分
+state["retrieved_clauses"][0]["content"]    # 命中的父块内容
 
-# 2. 查看当前检索命中的条款及得分
-state["retrieved_clauses"][0]["score"]
-state["retrieved_clauses"][0]["content"]
-
-# 3. 验证物理行号是否真实存在于原文中
 loc = self.retriever.get_chunk_location("乙方在签署本协议前已经独立研发")
-print(loc)  # 应输出 {'line_start': 89, 'line_end': 89, 'page': 1, 'status': 'located', 'verification_status': <VerificationStatus.VERIFIED: 'verified'>}
+loc["line_start"], loc["verification_status"]   # 行号是否与原文一致、是否 VERIFIED
 ```
+
+> 上面的行号/文本只是示例，请替换成你当前样本合同里的真实片段。
+
+---
+
+## 六、调试 Streamlit 的注意事项
+
+1. **断点会冻结页面**：命中断点时浏览器会"转圈"，这是正常的，`F5` 继续即可。
+2. **改完代码先重启**：Streamlit 会热重载，但调试会话不会自动重启；改逻辑后按 `Ctrl+Shift+F5`。
+3. **不要在 `st.cache` 边界内打太多断点**：高频 rerun 会反复命中，容易误以为死循环。
+
+---
+
+## 七、常见问题
+
+| 现象 | 原因 / 处理 |
+| --- | --- |
+| `ModuleNotFoundError: streamlit` / `langgraph` | 解释器不是 `.venv`，回到「一次性准备」第 1 步 |
+| `未检测到有效的大模型 API 密钥` | `.env` 缺失或键名写错。项目各模块在导入时用 `python-dotenv` 自动加载**根目录**的 `.env`，所以文件必须放在项目根目录 |
+| `Address already in use` | 端口被占：`streamlit run app.py --server.port 8502` 或 uvicorn `--port 8001` |
+| 首次上传扫描件很慢 | 本地 RapidOCR 首次加载模型 + 逐页识别，之后走磁盘缓存会秒级完成 |
+| 控制台中文乱码 | 已在 `settings.json` 设置 `PYTHONUTF8=1`；仍乱码则 `chcp 65001` |

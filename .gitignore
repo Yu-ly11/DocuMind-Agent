@@ -11,16 +11,19 @@ __pycache__/
 *$py.class
 *.so
 .pytest_cache/
+jieba.cache
 
 # 向量数据库与本地临时数据
 chroma_db/
 tmp_contracts/
+documind_uploads/
 *.db
 *.sqlite3
 *.log
 
-# IDE 与编辑器配置
-.vscode/
+# IDE 与编辑器配置（仅共享调试配置）
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
 .idea/
 *.swp
-

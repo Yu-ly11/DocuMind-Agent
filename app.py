@@ -1,7 +1,7 @@
 """
 DocuMind-Agent: 企业级长文档智能合规审查工作台 (Final Form)
 双引擎驱动：
-- 引擎 A: LangGraph 5节点状态机全自动合规大体检 (Agentic Audit)
+- 引擎 A: LangGraph 6节点状态机全自动合规大体检 (Agentic Audit)
 - 引擎 B: 毫秒级双阶段检索 + 流式打字机即问即答 Copilot (Interactive Streaming RAG)
 """
 
@@ -53,7 +53,7 @@ st.markdown("""
 
 # 顶部导航标题与技术标签
 st.title("⚖️ DocuMind-Agent: 企业级合同智能审查工作台")
-st.caption("🚀 架构支撑：**双引擎驱动** ｜ **LangGraph 5节点自治状态机** ｜ **Small-to-Big 双阶段检索** ｜ **秒级流式问答 Copilot** ｜ **Pydantic v2 强契约**")
+st.caption("🚀 架构支撑：**双引擎驱动** ｜ **LangGraph 6节点自治状态机** ｜ **Small-to-Big 双阶段检索** ｜ **秒级流式问答 Copilot** ｜ **Pydantic v2 强契约**")
 
 # 初始化 Session State
 if "current_file_path" not in st.session_state:
@@ -230,7 +230,7 @@ if target_path and Path(target_path).exists():
         # 工作流 A: LangGraph 状态机全面审计大报告
         # ==========================================
         with work_tab_audit:
-            st.caption("适合场景：法务一键交卷，自主驱动 5 节点状态机出具带证据链的合规诊断书。")
+            st.caption("适合场景：法务一键交卷，自主驱动 6 节点状态机出具带证据链的合规诊断书。")
             default_instruction = (
                 "请对本合同进行全方位的深度合规风控审查：\n"
                 "1. 审查‘知识产权’条款中服务商原有的底层通用算法与既有专利（Background IP）是否被无偿或强制买断；\n"
@@ -240,7 +240,7 @@ if target_path and Path(target_path).exists():
             )
             task_prompt = st.text_area("审查指令要求 (Prompt)", default_instruction, height=120)
 
-            if st.button("🚀 启动 LangGraph 5节点状态机全流程审查", type="primary", use_container_width=True):
+            if st.button("🚀 启动 LangGraph 6节点状态机全流程审查", type="primary", use_container_width=True):
                 with st.status("🤖 DocuMind LangGraph 状态机正在流转中...", expanded=True) as status:
                     try:
                         agent = LangGraphComplianceAgent(contract_text, use_parent_child=use_pc, sections=all_sections)
@@ -300,7 +300,7 @@ if target_path and Path(target_path).exists():
                 for idx, issue in enumerate(report.issues, start=1):
                     badge = "🔴" if issue.risk_level == RiskLevel.HIGH else ("🟡" if issue.risk_level == RiskLevel.MEDIUM else "🟢")
                     with st.expander(f"{badge} 【{issue.risk_level.value}】 {issue.title} ({issue.category})", expanded=True):
-                        loc_desc = f"物理行号: **第 {issue.evidence.line_start} - {issue.evidence.line_end} 行**" if issue.evidence.line_start is not None else "物理行号: **⚠️ 全文未精确定位**"
+                        loc_desc = f"物理行号: **{issue.evidence.line_label}**" if issue.evidence.line_start is not None else "物理行号: **⚠️ 全文未精确定位**"
                         st.markdown(f"**📍 条款出处**: `{issue.evidence.clause_title}` ({loc_desc})")
                         
                         if getattr(issue.evidence, "verification_status", "verified") == "unverified_needs_human_review":
@@ -324,7 +324,7 @@ if target_path and Path(target_path).exists():
 ## 风险问题清单
 """
                 for idx, issue in enumerate(report.issues, start=1):
-                    loc_md = f"第 {issue.evidence.line_start}-{issue.evidence.line_end} 行" if issue.evidence.line_start is not None else (f"第 {issue.evidence.page_number} 页" if issue.evidence.page_number is not None else "全文检索")
+                    loc_md = issue.evidence.line_label
                     report_markdown += f"""
 ### {idx}. [{issue.risk_level.value}] {issue.title}
 - **条款出处**: {issue.evidence.clause_title} ({loc_md})

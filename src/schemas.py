@@ -23,6 +23,18 @@ class VerificationStatus(str, Enum):
     INFRA_DEGRADED = "infra_degraded"                         # 检索精排基础设施降级/超时，置信度不可比
 
 
+def format_line_range(line_start: Optional[int], line_end: Optional[int]) -> str:
+    """
+    把物理行号格式化为可读文本。
+    单行条款折叠为「第 79 行」，避免出现「第 79 - 79 行」这类别扭的输出。
+    """
+    if line_start is None:
+        return ""
+    if line_end is None or line_end == line_start:
+        return f"第 {line_start} 行"
+    return f"第 {line_start}-{line_end} 行"
+
+
 class ClauseEvidence(BaseModel):
     """条款原文证据链追溯（支持物理行号、页码与严格可信度状态）"""
     clause_title: str = Field(..., description="相关条款标题或章节名，例如：'第8条 违约赔偿责任'")
@@ -34,6 +46,15 @@ class ClauseEvidence(BaseModel):
         default=VerificationStatus.UNVERIFIED, 
         description="证据物理核验状态 (Fail-Closed: 默认必须为 UNVERIFIED，需显式验证放行)"
     )
+
+    @property
+    def line_label(self) -> str:
+        """证据定位的可读文本（行号 → 页码 → 全文），供 UI 与导出报告复用。"""
+        if self.line_start is not None:
+            return format_line_range(self.line_start, self.line_end)
+        if self.page_number is not None:
+            return f"第 {self.page_number} 页"
+        return "全文检索"
 
 
 class ComplianceIssue(BaseModel):

@@ -16,6 +16,7 @@ if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
 from src.rag.hybrid_retriever import HybridRetriever
+from src.schemas import format_line_range
 
 load_dotenv()
 os.environ["http_proxy"] = ""
@@ -69,7 +70,7 @@ class ContractChatEngine:
                 "text": clause_text
             })
             if loc["line_start"] is not None:
-                loc_label = f"物理行号: 第 {loc['line_start']} - {loc['line_end']} 行"
+                loc_label = f"物理行号: {format_line_range(loc['line_start'], loc['line_end'])}"
             elif loc.get("page") is not None:
                 loc_label = f"所在页码: 第 {loc['page']} 页"
             else:
