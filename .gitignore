@@ -1,0 +1,26 @@
+# 环境与秘钥
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# 向量数据库与本地临时数据
+chroma_db/
+tmp_contracts/
+*.db
+*.sqlite3
+*.log
+
+# IDE 与编辑器配置
+.vscode/
+.idea/
+*.swp
+

@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  # 1. 核心业务微服务 (FastAPI + LangGraph + SSE)
+  documind-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: documind_backend_api
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - MODEL_NAME=${MODEL_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - RERANK_MODEL=${RERANK_MODEL}
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    command: ["uvicorn", "src.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+
+  # 2. 交互控制台 (Streamlit Web UI)
+  documind-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: documind_frontend_ui
+    restart: always
+    ports:
+      - "8501:8501"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+      - MODEL_NAME=${MODEL_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - RERANK_MODEL=${RERANK_MODEL}
+    volumes:
+      - ./chroma_db:/app/chroma_db
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    depends_on:
+      - documind-api
