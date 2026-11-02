@@ -5,8 +5,10 @@ DocuMind-Agent: 智能合同交互式流式问答引擎 (Interactive Streaming R
 
 import os
 import sys
+import time
+import sqlite3
 from pathlib import Path
-from typing import List, Dict, Any, Generator, Tuple
+from typing import List, Dict, Any, Generator, Tuple, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -22,9 +24,50 @@ load_dotenv()
 os.environ["http_proxy"] = ""
 os.environ["https_proxy"] = ""
 
+CHAT_DB_PATH = Path("tmp_contracts") / "chat_memory.sqlite"
+
+
+def init_chat_memory_db():
+    """初始化 SQLite 会话记忆数据表"""
+    CHAT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(CHAT_DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS chat_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thread_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                ts REAL NOT NULL
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_thread ON chat_memory(thread_id, ts)")
+
+
+def save_chat_message(thread_id: str, role: str, content: str):
+    """保存单条会话消息"""
+    init_chat_memory_db()
+    with sqlite3.connect(CHAT_DB_PATH) as conn:
+        conn.execute(
+            "INSERT INTO chat_memory (thread_id, role, content, ts) VALUES (?, ?, ?, ?)",
+            (thread_id, role, content, time.time())
+        )
+
+
+def load_chat_history(thread_id: str, limit: int = 10) -> List[Dict[str, str]]:
+    """读取指定会话的历史对话"""
+    init_chat_memory_db()
+    with sqlite3.connect(CHAT_DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT role, content FROM chat_memory WHERE thread_id = ? ORDER BY ts DESC LIMIT ?",
+            (thread_id, limit)
+        )
+        rows = cursor.fetchall()
+        return [{"role": r[0], "content": r[1]} for r in reversed(rows)]
+
 
 class ContractChatEngine:
-    """企业级合同即问即答流式引擎"""
+    """企业级合同即问即答流式引擎（支持持久化记忆与物理行号证据高亮）"""
 
     def __init__(self, retriever: HybridRetriever):
         self.retriever = retriever
@@ -38,15 +81,23 @@ class ContractChatEngine:
         self, 
         user_query: str, 
         history: List[Dict[str, str]] = None,
-        top_k: int = 3
+        top_k: int = 3,
+        thread_id: Optional[str] = None,
+        session_id: Optional[str] = None
     ) -> Tuple[Generator[str, None, None], List[Dict[str, Any]]]:
         """
         流式问答接口
         :param user_query: 用户提问
         :param history: 历史对话记录 [{"role": "user"/"assistant", "content": "..."}]
         :param top_k: 召回最相关的法条父块数量
+        :param thread_id: 可选持久化会话 ID，提供跨进程与跨会话记忆 (与 session_id 等价)
+        :param session_id: 会话标识别名
         :return: (token_stream_generator, citations_list)
         """
+        active_thread_id = thread_id or session_id
+        # 若未显式传入 history 但提供了 thread_id，从 SQLite 自动恢复记忆
+        if history is None and active_thread_id:
+            history = load_chat_history(active_thread_id, limit=6)
         # 1. 毫秒级双阶段混合检索 (BM25 + BGE-M3 + Rerank + Small-to-Big)
         hits = self.retriever.retrieve(
             user_query, 
@@ -94,9 +145,12 @@ class ContractChatEngine:
 
         prompt_messages = [{"role": "system", "content": system_instruction}]
 
-        # 注入最近历史对话（保持上下文连贯性）
+        # 注入最近历史对话（保持上下文连贯性，防御性剔除末尾可能重复的当前问题）
         if history:
-            for msg in history[-4:]:
+            clean_history = list(history)
+            if clean_history and clean_history[-1].get("content") == user_query:
+                clean_history = clean_history[:-1]
+            for msg in clean_history[-4:]:
                 prompt_messages.append({"role": msg["role"], "content": msg["content"]})
 
         # 注入当前带凭证的问题
@@ -114,9 +168,19 @@ class ContractChatEngine:
         )
 
         def stream_generator():
+            full_chunks = []
             for chunk in response:
                 content = chunk.choices[0].delta.content if chunk.choices else ""
                 if content:
+                    full_chunks.append(content)
                     yield content
+
+            # 若指定了会话 ID，生成完毕后自动持久化当前轮对话到 SQLite
+            if active_thread_id:
+                try:
+                    save_chat_message(active_thread_id, "user", user_query)
+                    save_chat_message(active_thread_id, "assistant", "".join(full_chunks))
+                except Exception:
+                    pass
 
         return stream_generator(), citations

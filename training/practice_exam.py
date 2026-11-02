@@ -44,23 +44,13 @@ def rrf_score_fusion(
     :return: 排序后的 [(doc, final_rrf_score), ...]
     """
     scores: Dict[str, float] = {}
+    for rank, doc in enumerate(bm25_ranked_docs, start=1):
+        scores[doc] = scores.get(doc, 0.0) + 1.0 / (k + rank)
 
-    # TODO: [请你补齐核心代码]
-    # 1. 遍历 bm25_ranked_docs，累加 1.0 / (k + rank)
-    # 2. 遍历 vector_ranked_docs，累加 1.0 / (k + rank)
-    # 3. 按最终分数降序排序并返回
-    # -------------------------------------------------------------
-    # YOUR CODE HERE
-    pass
-    # -------------------------------------------------------------
-def rrf_score_fusion(bm25_ranked_docs,vector_ranked_docs,k=60):
-    scores = {}
-    for rank,doc in enumerate(bm25_ranked_docs,start=1):
-        scores[doc]=scores.get(doc,0.0)+1.0/(k+rank)
+    for rank, doc in enumerate(vector_ranked_docs, start=1):
+        scores[doc] = scores.get(doc, 0.0) + 1.0 / (k + rank)
 
-    for rank,doc in enumerate(vector_ranked_docs,start=1):
-        scores[doc]=scores.get(doc,0.0)+1.0/(k+rank)
-    return sorted(scores.items(),key= lambda x: x[1],reverse=True) 
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True) 
 
 
 # ==============================================================================
@@ -88,16 +78,7 @@ def deduplicate_and_fetch_parents(
     :param parent_store: 父块字典，格式为 {parent_id: parent_full_text}
     :return: 去重后按 parent_id 从小到大排序的父块文本列表
     """
-    # TODO: [请你补齐核心代码]
-    # 1. 提取所有命中子块里的 parent_id 并去重
-    # 2. 按照 parent_id 从小到大升序排序
-    # 3. 从 parent_store 中取出对应父块文本返回
-    # -------------------------------------------------------------
-    # YOUR CODE HERE
-    pass
-    # -------------------------------------------------------------
-def deduplicate_and_fetch_parents(retrieved_child_chunks,parent_store):
-    unique_parent_ids =sorted(list({chunk["parent_id"] for chunk in retrieved_child_chunks if "parent_id" in chunk}))
+    unique_parent_ids = sorted(list({chunk["parent_id"] for chunk in retrieved_child_chunks if "parent_id" in chunk}))
     return [parent_store[pid] for pid in unique_parent_ids if pid in parent_store]
 
 # ==============================================================================
@@ -126,24 +107,6 @@ def critic_grounding_evaluator(
     """
     执行事实依据核验与循环路由决策
     """
-    # TODO: [请你补齐核心代码]
-    # 1. 检查 snippet 是否真实存在于 contract_full_text 中
-    # 2. 若存在，返回 is_grounded=True, retry_count不变, next_action="pass"
-    # 3. 若不存在：
-    #    - 新重试次数 = current_retry_count + 1
-    #    - 若新重试次数 >= max_retries: next_action = "abort"
-    #    - 否则: next_action = "retry"
-    # -------------------------------------------------------------
-    # YOUR CODE HERE
-    pass
-    # -------------------------------------------------------------
-
-def critic_grounding_evaluator(
-    snippet: str, 
-    contract_full_text: str, 
-    current_retry_count: int, 
-    max_retries: int = 3
-):
     is_grounded = snippet in contract_full_text
     if is_grounded:
         return {
@@ -154,10 +117,10 @@ def critic_grounding_evaluator(
     new_retries = current_retry_count + 1
     next_action = "abort" if new_retries >= max_retries else "retry"
     return {
-            "is_grounded": False,
-            "retry_count": new_retries,
-            "next_action": next_action
-        }
+        "is_grounded": False,
+        "retry_count": new_retries,
+        "next_action": next_action
+    }
 # ==============================================================================
 # 自动化检验单元测试套件 (Self-Checking Test Suite)
 # ==============================================================================

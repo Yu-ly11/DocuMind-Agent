@@ -1,0 +1,30 @@
+{"id": "q001", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "合同总金额是多少元？", "gold_evidence": "2.1 本合同总金额为人民币 500,000.00 元（大写：人民币伍拾万元整）"}
+{"id": "q002", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "首付款的支付比例和支付时间是什么？", "gold_evidence": "合同签署后 10 个工作日内支付 20%（￥100,000.00 元）"}
+{"id": "q003", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "终验款是在多长时间内支付剩余的多少比例？", "gold_evidence": "通过甲方单方验收合格后，在 180 个工作日内支付剩余 80%"}
+{"id": "q004", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "乙方在签约前独立拥有的底层通用基础框架归谁所有？", "gold_evidence": "自本合同生效起亦无偿、排他、永久性转让给甲方所有"}
+{"id": "q005", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "乙方离职员工如果泄密，乙方需承担什么责任？", "gold_evidence": "若乙方离职员工泄密，乙方须承担全部连带赔偿责任"}
+{"id": "q006", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "乙方交付进度延迟每日需支付多少比例的违约金？", "gold_evidence": "每逾期一日，乙方须向甲方支付合同总金额 2% 的逾期违约金"}
+{"id": "q007", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "逾期超过多少日甲方有权单方解除合同？", "gold_evidence": "若逾期超过 15 日，甲方有权单方面解除合同"}
+{"id": "q008", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "解除合同时乙方需额外支付多少比例作为惩罚性违约金？", "gold_evidence": "额外向甲方支付合同总额 100%（即 ￥500,000.00 元）作为惩罚性违约金"}
+{"id": "q009", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "如果甲方未按约定支付款项，乙方能否暂停服务？", "gold_evidence": "若甲方未按约定支付款项，乙方不得暂停系统支持服务"}
+{"id": "q010", "source": "tests/sample_contracts/sample_procurement_contract.md", "question": "发生争议无法协商时向哪个法院提起诉讼？", "gold_evidence": "向甲方住所地（北京市海淀区）有管辖权的人民法院提起诉讼"}
+{"id": "q011", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "本合同含税总价款是多少？", "gold_evidence": "人民币 6,800,000.00 元（大写：人民币陆佰捌拾万元整）"}
+{"id": "q012", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "核心集群并发 TPS 指标要求是多少？", "gold_evidence": "核心集群并发 TPS 不得低于 5000"}
+{"id": "q013", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "数据库查询响应时间 P99 要求不超过多少毫秒？", "gold_evidence": "数据库查询响应时间（P99）在基准负载下不得超过 200 毫秒"}
+{"id": "q014", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "合同第一期预付款金额是多少？", "gold_evidence": "甲方向乙方支付合同总金额的 20%，即人民币 1,360,000.00 元"}
+{"id": "q015", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "项目实施整体完成和生产部署的周期是多少天？", "gold_evidence": "在合同生效之日起 150 个日历日内完成系统整体开发与生产部署"}
+{"id": "q016", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "甲方收到验收申请报告后享有几个工作日的审查周期？", "gold_evidence": "享有 60 个工作日 的深度审查与安全合规评估周期"}
+{"id": "q017", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "如果审查周期届满甲方未出具书面盖章确认函如何处理？", "gold_evidence": "未向乙方出具书面盖章之验收合格确认函的，一律视为本系统“验收未通过 / 不合格”"}
+{"id": "q018", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "履行合同过程中产生的一切衍生技术成果和代码归属何方？", "gold_evidence": "全部、无条件且排他性地归甲方单独所有"}
+{"id": "q019", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "乙方既有知识产权是以何种形式许可给甲方？", "gold_evidence": "以独占性、无偿、不可撤销、永久且全球范围买断形式许可给甲方自由使用"}
+{"id": "q020", "source": "tests/sample_contracts/real_judicial_software_dispute_contract.md", "question": "项目终验后几个工作日内乙方应交付全部完整源代码？", "gold_evidence": "在项目终验后 3 个工作日内，将全部可编译的完整源代码"}
+{"id": "q021", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "标的系统的总包对价是多少？", "gold_evidence": "人民币 3,800,000.00 元（大写：人民币叁佰捌拾万元整）"}
+{"id": "q022", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "现场驻场开发团队人数和经验要求是什么？", "gold_evidence": "派驻不少于 12 名具有 5 年以上经验的高级工程师"}
+{"id": "q023", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "核心微服务可用性指标考核门槛是多少？", "gold_evidence": "核心微服务可用性不低于 99.95%"}
+{"id": "q024", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "系统灾备恢复时间目标 RTO 和恢复点目标 RPO 是多少？", "gold_evidence": "系统灾备恢复时间目标（RTO）小于 15 分钟，恢复点目标（RPO）小于 1 分钟"}
+{"id": "q025", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "第四笔终验款在请款后多少个工作日内支付？", "gold_evidence": "在收到乙方请款申请及全额发票后 180 个工作日内"}
+{"id": "q026", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "合同中是否排除了逾期未答复视为验收合格的沉默认可规则？", "gold_evidence": "超过一定期限未提出书面异议视为验收合格（即沉默认可）”规则在本合同中被明确排除"}
+{"id": "q027", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "乙方交付延误每日支付的违约金比例是多少？", "gold_evidence": "每逾期一日，乙方须向甲方支付相当于合同总金额 1.5% 的逾期违约金"}
+{"id": "q028", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "逾期超过多少工作日甲方有权单方无条件解约？", "gold_evidence": "逾期超过 20 个工作日，甲方有权单方面无条件解除本合同"}
+{"id": "q029", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "单方面解约时乙方须额外支付的违约金比例是多少？", "gold_evidence": "额外支付合同总额 50%（即人民币 ￥1,900,000.00 元）作为一次性违约金"}
+{"id": "q030", "source": "tests/sample_contracts/large_scale_procurement_contract.md", "question": "离职满 5 年以内的前雇员泄密乙方须支付多少惩罚性违约金？", "gold_evidence": "须向甲方支付合同总金额 100%（即人民币 ￥3,800,000.00 元）的惩罚性违约金"}

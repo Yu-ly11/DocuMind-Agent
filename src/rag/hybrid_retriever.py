@@ -9,6 +9,8 @@ DocuMind-Agent: 工业级双阶段混合检索引擎 (Two-Stage Hybrid RAG)
 import os
 import sys
 import hashlib
+import re
+from bisect import bisect_right
 from pathlib import Path
 from typing import List, Tuple, Dict, Any, Optional
 from collections import defaultdict
@@ -100,6 +102,20 @@ class HybridRetriever:
         self.last_retrieval_mode: str = "hybrid_rerank"
         self.parent_map: dict[str, str] = {}
         self.child_to_parent: dict[str, str] = {}
+
+        # 构建物理行号绝对偏移表与字符级归一化映射 (SpanMap / SpanAnchor 基础设施)
+        self.line_offsets: List[int] = [0]
+        for i, ch in enumerate(self.full_text):
+            if ch == "\n":
+                self.line_offsets.append(i + 1)
+
+        self._norm_text_chars: List[str] = []
+        self._norm_to_raw_indices: List[int] = []
+        for raw_idx, ch in enumerate(self.full_text):
+            if ch.isalnum() or ('\u4e00' <= ch <= '\u9fa5'):
+                self._norm_text_chars.append(ch.lower())
+                self._norm_to_raw_indices.append(raw_idx)
+        self._norm_text = "".join(self._norm_text_chars)
 
         # 1. 计算当前合同内容的 MD5 唯一数字指纹（前 12 位）
         prefix = "pc_" if use_parent_child else "doc_"
@@ -289,13 +305,19 @@ class HybridRetriever:
 
     def get_chunk_location(self, doc_text: str) -> dict[str, Any]:
         """
-        根据引用的文本片段，在结构化章节与原始文档中精确计算物理行号与页码。
-        优先使用 sections 做 0 误差物理行号与真实页码映射，消灭 8 行累积漂移；未定位到时返回 UNVERIFIED。
+        根据引用的文本片段，在结构化章节与原始文档中精确计算绝对字符 Span 区间与物理行号/页码。
+        三级自适应定位策略 (SpanMap / SpanAnchor 工业实现)：
+        1. 章节结构化精确匹配 (Fast-Path: Section Exact Substring)
+        2. 全文绝对字符匹配 (Full-Text Exact Substring)
+        3. 归一化字符流映射对齐 (Robust Span Alignment, 消除标点/断行/改写干扰)
+        未闭环时坚决 Fail-Closed 返回 UNVERIFIED，杜绝虚假证据。
         """
-        if not doc_text:
+        if not doc_text or not doc_text.strip():
             return {
                 "line_start": None, 
                 "line_end": None, 
+                "char_start": None,
+                "char_end": None,
                 "page": None, 
                 "status": "unlocated",
                 "verification_status": VerificationStatus.UNVERIFIED
@@ -304,7 +326,7 @@ class HybridRetriever:
         search_snippet = doc_text.strip()[:40]
         fallback_snippet = search_snippet[:20] if len(search_snippet) > 20 else search_snippet
 
-        # 方案 1: 若持有解析期产出的结构化章节 (ParsedSection)，实现绝对 0 误差定位与真实页码提取
+        # 方案 1: 章节精确匹配 (保留原测试用例 0 漂移行为)
         if self.sections:
             for sec in self.sections:
                 sec_text = getattr(sec, "content", "")
@@ -321,12 +343,14 @@ class HybridRetriever:
                     return {
                         "line_start": line_start,
                         "line_end": line_end,
+                        "char_start": None,
+                        "char_end": None,
                         "page": page,
                         "status": "located",
                         "verification_status": VerificationStatus.VERIFIED
                     }
 
-        # 方案 2: 降级在全文粗定位
+        # 方案 2: 全文精确子串匹配
         idx = self.full_text.find(search_snippet)
         if idx == -1 and len(fallback_snippet) >= 15:
             idx = self.full_text.find(fallback_snippet)
@@ -337,14 +361,63 @@ class HybridRetriever:
             return {
                 "line_start": line_start,
                 "line_end": line_end,
+                "char_start": idx,
+                "char_end": idx + len(search_snippet),
                 "page": None,
                 "status": "located",
                 "verification_status": VerificationStatus.VERIFIED
             }
 
+        # 方案 3: Span 级归一化流对齐 (Robust Span Alignment)
+        q_norm_chars = [ch.lower() for ch in doc_text if ch.isalnum() or ('\u4e00' <= ch <= '\u9fa5')]
+        q_norm = "".join(q_norm_chars)
+        
+        # 尝试匹配长度从 30 下探至 12 个纯字符的核心切片
+        match_norm_idx = -1
+        matched_slice_len = 0
+        for test_len in (30, 24, 18, 14, 10):
+            if len(q_norm) >= test_len:
+                sub_q = q_norm[:test_len]
+                found_idx = self._norm_text.find(sub_q)
+                if found_idx != -1:
+                    match_norm_idx = found_idx
+                    matched_slice_len = test_len
+                    break
+
+        if match_norm_idx != -1 and matched_slice_len > 0 and self._norm_to_raw_indices:
+            raw_char_start = self._norm_to_raw_indices[match_norm_idx]
+            end_norm_pos = min(match_norm_idx + matched_slice_len - 1, len(self._norm_to_raw_indices) - 1)
+            raw_char_end = self._norm_to_raw_indices[end_norm_pos] + 1
+
+            line_start = bisect_right(self.line_offsets, raw_char_start)
+            line_end = max(line_start, bisect_right(self.line_offsets, raw_char_end))
+
+            # 从 sections 中反查对应真实页码
+            page = None
+            if self.sections:
+                for sec in self.sections:
+                    sec_ls = getattr(sec, "line_start", 1) or 1
+                    sec_le = getattr(sec, "line_end", sec_ls) or sec_ls
+                    if sec_ls <= line_start <= sec_le:
+                        page = getattr(sec, "page_start", None)
+                        break
+
+            return {
+                "line_start": line_start,
+                "line_end": line_end,
+                "char_start": raw_char_start,
+                "char_end": raw_char_end,
+                "page": page,
+                "status": "located",
+                "verification_status": VerificationStatus.VERIFIED
+            }
+
+        # Fail-Closed: 无法可靠物理闭环的疑似幻觉，坚决拦截
         return {
             "line_start": None,
             "line_end": None,
+            "char_start": None,
+            "char_end": None,
             "page": None,
             "status": "unlocated",
             "verification_status": VerificationStatus.UNVERIFIED

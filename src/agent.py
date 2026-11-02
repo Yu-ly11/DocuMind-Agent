@@ -1,7 +1,8 @@
 """
-DocuMind-Agent: 工业级 ReAct 合规审查自主智能体
+DocuMind-Agent: 独立轻量 ReAct 合规审查智能体 (Legacy / Standalone Prototype)
 具备多工具调度 (两阶段 HybridRetriever + 计算器)、自主决策循环与最大迭代防御。
-已完成架构重构：工具定义与执行完全收纳在 src/tools/ 模块中。
+注：企业级高可用长文档合规审查生产流已全面收敛至 src/graph_agent.py (LangGraph 6节点状态机)。
+本模块保留作为轻量交互实验与单文件免编排评测入口。
 """
 import sys
 import os
@@ -61,7 +62,16 @@ class ReActComplianceAgent:
             return self.search_executor(args.get("query", ""))
             
         elif name == "calc_penalty_risk":
-            res = calc_penalty_risk(**args)
+            amt = args.get("contract_total_amount")
+            rate = args.get("daily_rate")
+            days = args.get("overdue_days")
+            if isinstance(rate, (int, float)) and rate > 1:
+                rate = rate / 100.0
+            res = calc_penalty_risk(
+                contract_total_amount=float(amt) if (amt is not None and str(amt).replace(".", "", 1).isdigit()) else None,
+                daily_rate=float(rate) if (rate is not None and str(rate).replace(".", "", 1).isdigit()) else None,
+                overdue_days=int(days) if (days is not None and str(days).isdigit()) else None
+            )
             return json.dumps(res, ensure_ascii=False)
             
         return f"错误：未知的工具名 {name}"

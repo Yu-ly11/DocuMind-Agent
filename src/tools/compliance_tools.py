@@ -9,18 +9,22 @@ from src.rag.hybrid_retriever import HybridRetriever
 def calc_penalty_risk(
     contract_total_amount: Optional[float] = None, 
     daily_rate: Optional[float] = None, 
-    overdue_days: Optional[int] = 30
+    overdue_days: Optional[int] = None
 ) -> Dict[str, Any]:
     """
     【工具 1：违约金风控数学计算器】
     根据合同总金额、日违约金比例和逾期天数，精确计算累计违约金，并依据民法典司法解释输出风控评估。
-    拒绝编造默认值：若合同未约定金额或比例，显式返回数据不全状态，交由法务人工复核。
+    拒绝编造默认值：
+    - 若未约定金额或比例，返回 incomplete_data；
+    - 若约定了日费率但未约定逾期天数，返回 partial_data 并给出每日违约金，禁止臆造累计天数；
+    - 要素完整时方测算累计金额并判定商业过高风险 (30% 警戒线)。
     
     :param contract_total_amount: 合同总金额（人民币元），若合同未载明可传 None
     :param daily_rate: 每日违约金比例（例如每日 1.5% 则传入 0.015），若未载明可传 None
-    :param overdue_days: 预估或约定的逾期天数（默认 30 天）
+    :param overdue_days: 预估或约定的逾期天数，未明确约定时传 None，禁止编造
     :return: 包含精确违约金、占合同总额商业比例、法律依据与司法调节风险提示
     """
+    # 合同总额或日费率缺失 -> 无法测算
     if contract_total_amount is None or daily_rate is None or contract_total_amount <= 0 or daily_rate <= 0:
         return {
             "status": "incomplete_data",
@@ -33,7 +37,26 @@ def calc_penalty_risk(
             "legal_risk_warning": "【要素缺失需人工核查】合同条款未载明明确的合同总金额或日违约金费率，无法测算确定性金额。需法务线下核对违约金起算基数。"
         }
 
-    days = overdue_days if (overdue_days is not None and overdue_days > 0) else 30
+    # 只约定了日费率、未约定天数：仅给出每日违约金，拒绝编造累计天数
+    if overdue_days is None or overdue_days <= 0:
+        daily_penalty = round(contract_total_amount * daily_rate, 2)
+        return {
+            "status": "partial_data",
+            "contract_total_amount": contract_total_amount,
+            "daily_rate_percent": f"{daily_rate * 100:.2f}%",
+            "overdue_days": None,
+            "calculated_total_penalty": None,
+            "daily_penalty": daily_penalty,
+            "penalty_ratio_of_contract": None,
+            "is_commercial_excessive": False,
+            "legal_reference": "《民法典》第585条及最高人民法院《合同编通则解释》第65条",
+            "legal_risk_warning": (
+                f"合同未约定逾期天数，仅能测算【每日违约金 ￥{daily_penalty}（日费率 {daily_rate * 100:.2f}%）】。"
+                "累计金额需法务确认逾期天数后再行测算，系统拒绝编造天数。"
+            )
+        }
+
+    days = int(overdue_days)
     total_penalty = round(contract_total_amount * daily_rate * days, 2)
     penalty_ratio = total_penalty / contract_total_amount
     is_commercial_excessive = penalty_ratio > 0.30
@@ -68,7 +91,7 @@ CALC_PENALTY_SCHEMA = {
             "properties": {
                 "contract_total_amount": {"type": ["number", "null"], "description": "合同总金额(元)，若未载明传 null"},
                 "daily_rate": {"type": ["number", "null"], "description": "每日违约金比例，如 1.5% 必须转换为 0.015，若未载明传 null"},
-                "overdue_days": {"type": "integer", "description": "预估或约定的违约天数，默认 30"}
+                "overdue_days": {"type": ["integer", "null"], "description": "预估或约定的违约天数；合同未约定则传 null，禁止编造"}
             },
             "required": []
         }
