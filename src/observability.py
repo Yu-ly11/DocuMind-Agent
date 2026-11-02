@@ -7,6 +7,7 @@ import json
 import os
 import time
 import uuid
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
@@ -50,6 +51,7 @@ class Tracer:
     def __init__(self, trace_id: Optional[str] = None):
         self.trace_id = trace_id or new_trace_id()
         self.records: List[Dict[str, Any]] = []
+        self._lock = threading.Lock()
         TRACE_DIR.mkdir(parents=True, exist_ok=True)
         self.path = TRACE_DIR / f"{self.trace_id}.jsonl"
 
@@ -61,7 +63,7 @@ class Tracer:
         tokens: Optional[Dict[str, int]] = None,
         **extra
     ) -> Dict[str, Any]:
-        """记录单个节点的执行跨度 (Span)"""
+        """记录单个节点的执行跨度 (Span, 线程安全)"""
         record = {
             "trace_id": self.trace_id,
             "ts": time.time(),
@@ -71,12 +73,13 @@ class Tracer:
             "tokens": tokens or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
             **extra
         }
-        self.records.append(record)
-        try:
-            with open(self.path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        with self._lock:
+            self.records.append(record)
+            try:
+                with open(self.path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
         return record
 
     def get_summary(self) -> Dict[str, Any]:
