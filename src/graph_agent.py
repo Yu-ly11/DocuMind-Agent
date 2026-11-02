@@ -12,12 +12,26 @@ import os
 import sys
 import json
 import re
+import sqlite3
 from pathlib import Path
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
+import time
 from openai import OpenAI
 from dotenv import load_dotenv
+
+# 兼容 Windows 平台 GBK 终端 Emoji 输出，避免 UnicodeEncodeError
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 # 确保项目根目录在 sys.path
 root_dir = str(Path(__file__).resolve().parent.parent)
@@ -27,6 +41,7 @@ if root_dir not in sys.path:
 from src.rag.hybrid_retriever import HybridRetriever
 from src.parser import DocumentParser
 from src.tools.compliance_tools import calc_penalty_risk
+from src.observability import Tracer, extract_token_usage, new_trace_id
 from src.schemas import (
     RiskLevel,
     ClauseEvidence,
@@ -58,6 +73,7 @@ class AuditState(TypedDict):
     retry_count: int                            # 当前任务的 Query 改写重试次数 (上限 3 轮)
     final_report: Optional[Dict[str, Any]]      # 最终组装的合规审计大报告
     trace_logs: List[str]                       # 全链路可观测性 Trace 审计足迹
+    trace_id: str                               # 结构化可观测性链路唯一标识
 
 
 # ==========================================
@@ -66,16 +82,18 @@ class AuditState(TypedDict):
 class AuditNodes:
     """封装 LangGraph 五大节点的业务逻辑与 LLM 交互"""
 
-    def __init__(self, retriever: HybridRetriever):
+    def __init__(self, retriever: HybridRetriever, tracer: Optional[Tracer] = None):
         self.client = OpenAI(
             api_key=os.getenv("OPENAI_API_KEY"),
             base_url=os.getenv("OPENAI_BASE_URL")
         )
         self.model = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V3")
         self.retriever = retriever
+        self.tracer = tracer
 
     def task_planner_node(self, state: AuditState) -> Dict[str, Any]:
         """【节点 1: Task Planner】将审查需求拆解为正交的法务审查子任务"""
+        t0 = time.time()
         print("\n" + "=" * 60)
         print("🧭 [Node 1: Task Planner] 正在对合同合规任务进行维度拆解与动态规划...")
         
@@ -97,8 +115,10 @@ class AuditNodes:
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.1
+            temperature=0.1,
+            timeout=60
         )
+        tokens = extract_token_usage(response)
         raw_res = response.choices[0].message.content
         try:
             parsed = json.loads(raw_res)
@@ -113,7 +133,16 @@ class AuditNodes:
         for t in tasks:
             print(f"     - [{t['topic']}] 检索意图: '{t['query']}'")
 
-        log_msg = f"[Planner] 拆解为 {len(tasks)} 个法务子议题"
+        dur_ms = (time.time() - t0) * 1000
+        if self.tracer:
+            self.tracer.span(
+                "task_planner",
+                duration_ms=dur_ms,
+                tokens=tokens,
+                tasks_count=len(tasks)
+            )
+
+        log_msg = f"[Planner] 拆解为 {len(tasks)} 个法务子议题 (耗时 {dur_ms:.1f}ms)"
         first_query = tasks[0]["query"] if tasks else state["task_instruction"]
         return {
             "plan_tasks": tasks,
@@ -125,6 +154,7 @@ class AuditNodes:
 
     def hybrid_retriever_node(self, state: AuditState) -> Dict[str, Any]:
         """【节点 2: Hybrid Retriever】调用双阶段混合检索器抓取法条细则与父块上下文"""
+        t0 = time.time()
         query = state["current_query"]
         task_idx = state["current_task_idx"]
         task_info = state["plan_tasks"][task_idx] if task_idx < len(state["plan_tasks"]) else {}
@@ -138,6 +168,16 @@ class AuditNodes:
         for rank, (doc, score) in enumerate(hits, start=1):
             clauses.append({"rank": rank, "content": doc, "score": score})
             print(f"  📄 [命中条款 Top{rank} | 得分: {score:.4f}]: {doc[:80]}...")
+
+        dur_ms = (time.time() - t0) * 1000
+        if self.tracer:
+            self.tracer.span(
+                "hybrid_retriever",
+                duration_ms=dur_ms,
+                query=query,
+                topic=topic,
+                hits_count=len(clauses)
+            )
 
         log_msg = f"[Retriever] Query '{query}' 命中 {len(clauses)} 块，Top1得分: {clauses[0]['score'] if clauses else 0}"
         return {
@@ -182,14 +222,36 @@ class AuditNodes:
                 temperature=0.0
             )
             args = json.loads(resp.choices[0].message.content)
-            # 执行本地确定性 Python 数学函数（安全解析，无造假默认值）
-            raw_amt = args.get("contract_total_amount")
-            raw_rate = args.get("daily_rate")
-            raw_days = args.get("overdue_days")
 
-            amt = float(raw_amt) if (raw_amt is not None and str(raw_amt).replace('.', '', 1).isdigit()) else None
-            rate = float(raw_rate) if (raw_rate is not None and str(raw_rate).replace('.', '', 1).isdigit()) else None
-            days = int(raw_days) if (raw_days is not None and str(raw_days).isdigit()) else 30
+            def _safe_float(value):
+                """稳健数值解析：支持 int/float、千分位逗号、百分号、负号；失败返回 None。"""
+                if value is None:
+                    return None
+                if isinstance(value, (int, float)):
+                    return float(value)
+                s = str(value).strip().replace(",", "").replace("，", "").replace("％", "%")
+                if s.endswith("%"):
+                    s = s[:-1]
+                    if s in ("", "-", "."):
+                        return None
+                    try:
+                        return float(s) / 100.0
+                    except ValueError:
+                        return None
+                try:
+                    return float(s)
+                except ValueError:
+                    return None
+
+            amt = _safe_float(args.get("contract_total_amount"))
+            rate = _safe_float(args.get("daily_rate"))
+            days = args.get("overdue_days")
+            days = int(days) if isinstance(days, (int, float)) and not isinstance(days, bool) else \
+                   (int(str(days)) if isinstance(days, str) and str(days).strip().isdigit() else None)
+
+            # 防御：若 LLM 把 "1.5%" 误写成数字 1.5，按百分数修正（日费率不可能 > 100%）
+            if rate is not None and rate > 1:
+                rate = rate / 100.0
 
             cert = calc_penalty_risk(
                 contract_total_amount=amt,
@@ -201,6 +263,8 @@ class AuditNodes:
                 print(f"     合同额: ￥{cert['contract_total_amount']} | 日费率: {cert['daily_rate_percent']} | 测算逾期: {cert['overdue_days']} 天")
                 print(f"     累计违约金: ￥{cert['calculated_total_penalty']} (占合同额 {cert['penalty_ratio_of_contract']})")
                 print(f"     法务风控提示: {cert['legal_risk_warning'][:50]}...")
+            elif cert["status"] == "partial_data":
+                print(f"  ℹ️ [本地算子部分测算]: 日违约金 ￥{cert.get('daily_penalty')}，系统拒绝编造逾期天数。")
             else:
                 print(f"  ℹ️ [本地算子提示]: {cert['legal_risk_warning']}")
 
@@ -335,8 +399,15 @@ class AuditNodes:
                 log_tag = "[Critic] 议题核准通过"
                 status_to_set = VerificationStatus.VERIFIED
 
-            if state["accumulated_issues"] and "evidence" in latest_issue:
-                latest_issue["evidence"]["verification_status"] = status_to_set
+            updated_issues = list(state.get("accumulated_issues", []))
+            if updated_issues and "evidence" in updated_issues[-1]:
+                updated_issues[-1] = {
+                    **updated_issues[-1],
+                    "evidence": {
+                        **updated_issues[-1]["evidence"],
+                        "verification_status": status_to_set,
+                    },
+                }
 
             next_idx = task_idx + 1
             is_all_done = next_idx >= len(state["plan_tasks"])
@@ -347,6 +418,7 @@ class AuditNodes:
                 "current_task_idx": next_idx,
                 "current_query": next_query,
                 "retry_count": 0,
+                "accumulated_issues": updated_issues,
                 "trace_logs": state.get("trace_logs", []) + [f"{log_tag}，总进度 {next_idx}/{len(state['plan_tasks'])}"]
             }
 
@@ -379,15 +451,20 @@ class AuditNodes:
         # Fail-Closed 机制：如实标记为 UNVERIFIED，给法务最真实透明的风控标记
         print("  🚨 [Critic 熔断]：已重试 3 轮仍未在原文闭环证据链，系统拒绝伪造可信度！")
         print("     已将该议题明确标记为【未核验-需人工复核】，强制收敛并推进下一项。")
-        if state["accumulated_issues"]:
-            target_issue = state["accumulated_issues"][-1]
-            if "evidence" in target_issue:
-                target_issue["evidence"]["verification_status"] = VerificationStatus.UNVERIFIED
-            target_issue["risk_analysis"] = (
-                "【⚠️ 证据未闭环-需人工线下核验】：该条款摘录在合同中未实现100%物理锚定，"
-                "可能存在模型推理幻觉或文本扫描跨页断裂，请法务人员重点复核。\n"
-                + target_issue.get("risk_analysis", "")
-            )
+        updated_issues = list(state.get("accumulated_issues", []))
+        if updated_issues:
+            target_issue = updated_issues[-1]
+            updated_ev = dict(target_issue.get("evidence", {}))
+            updated_ev["verification_status"] = VerificationStatus.UNVERIFIED
+            updated_issues[-1] = {
+                **target_issue,
+                "evidence": updated_ev,
+                "risk_analysis": (
+                    "【⚠️ 证据未闭环-需人工线下核验】：该条款摘录在合同中未实现100%物理锚定，"
+                    "可能存在模型推理幻觉或文本扫描跨页断裂，请法务人员重点复核。\n"
+                    + target_issue.get("risk_analysis", "")
+                )
+            }
 
         next_idx = task_idx + 1
         is_all_done = next_idx >= len(state["plan_tasks"])
@@ -398,6 +475,7 @@ class AuditNodes:
             "current_task_idx": next_idx,
             "current_query": next_query,
             "retry_count": 0,
+            "accumulated_issues": updated_issues,
             "trace_logs": state.get("trace_logs", []) + [f"[Critic] 达到重试上限熔断，标记未核验需人工复核，总进度 {next_idx}/{len(state['plan_tasks'])}"]
         }
 
@@ -412,14 +490,21 @@ class AuditNodes:
         med_cnt = sum(1 for i in issues_raw if i.get("risk_level") == "中风险")
         low_cnt = sum(1 for i in issues_raw if i.get("risk_level") == "低风险")
 
-        # Fail-Closed 严谨核查：统计所有未完全闭环证据项
+        # Fail-Closed 严谨核查：解耦未闭环证据项与基础设施降级项
         unverified_cnt = 0
+        infra_degraded_cnt = 0
         for i in issues_raw:
-            st_val = i.get("evidence", {}).get("verification_status")
-            if st_val != VerificationStatus.VERIFIED and st_val != VerificationStatus.VERIFIED.value:
+            raw = i.get("evidence", {}).get("verification_status")
+            st = raw.value if isinstance(raw, VerificationStatus) else str(raw)
+            if st == VerificationStatus.VERIFIED.value:
+                continue
+            elif st == VerificationStatus.INFRA_DEGRADED.value:
+                infra_degraded_cnt += 1
+            else:
                 unverified_cnt += 1
 
         # 报表级安全闸门：若存在未闭环证据项，综合定级绝不评为 LOW（至少为 MEDIUM 提示人工复核）
+        # 注意：infra_degraded 不强制抬升风险等级，因其仍基于已 grounding 的真实条款
         if high_cnt > 0:
             overall_risk = RiskLevel.HIGH
         elif med_cnt > 0 or unverified_cnt > 0:
@@ -489,6 +574,8 @@ class AuditNodes:
         ]
         if unverified_cnt > 0:
             summary_lines.append(f"其中有 {unverified_cnt} 项证据未能在原文完成100%物理闭环，已如实标为【需人工复核】。")
+        if infra_degraded_cnt > 0:
+            summary_lines.append(f"另有 {infra_degraded_cnt} 项条款由于精排服务超时已按粗排证据降级放行。")
         if high_cnt > 0:
             summary_lines.append("存在可能造成单方重大权责失衡或严重赔偿敞口的风险项，建议法务严控谈判并予以修改。")
         else:
@@ -501,6 +588,7 @@ class AuditNodes:
         if not passed_topics:
             passed_topics = ["合同主体基本信息与准入格式规范"]
 
+        trace_id_val = state.get("trace_id") or (self.tracer.trace_id if self.tracer else None)
         report = ContractAuditReport(
             contract_name=detected_name,
             audit_summary=" ".join(summary_lines),
@@ -509,9 +597,11 @@ class AuditNodes:
             medium_risk_count=med_cnt,
             low_risk_count=low_cnt,
             unverified_count=unverified_cnt,
+            infra_degraded_count=infra_degraded_cnt,
             needs_human_review=(unverified_cnt > 0),
             issues=compliance_issues,
-            passed_items=passed_topics
+            passed_items=passed_topics,
+            trace_id=trace_id_val
         )
 
         print(f"🎉 审查报告生成就绪！综合定级: 【{report.overall_risk.value}】 (高危: {high_cnt} | 中危: {med_cnt})")
@@ -521,9 +611,25 @@ class AuditNodes:
 # ==========================================
 # 3. 构造 LangGraph 状态机并编译
 # ==========================================
-def build_compliance_graph(retriever: HybridRetriever):
-    """编译企业级合规审查 StateGraph 有向有环图"""
-    nodes = AuditNodes(retriever)
+_CHECKPOINT_CONN = None
+
+
+def get_sqlite_checkpointer():
+    """获取带 WAL 高并发模式支持的 SQLite 持久化检查点实例"""
+    global _CHECKPOINT_CONN
+    if _CHECKPOINT_CONN is None:
+        Path("tmp_contracts").mkdir(parents=True, exist_ok=True)
+        _CHECKPOINT_CONN = sqlite3.connect("tmp_contracts/checkpoints.sqlite", check_same_thread=False)
+        _CHECKPOINT_CONN.execute("PRAGMA journal_mode=WAL;")
+        _CHECKPOINT_CONN.execute("PRAGMA synchronous=NORMAL;")
+    saver = SqliteSaver(_CHECKPOINT_CONN)
+    saver.setup()
+    return saver
+
+
+def build_compliance_graph(retriever: HybridRetriever, tracer: Optional[Tracer] = None):
+    """编译企业级合规审查 StateGraph 有向有环图，挂载 SQLite 持久化检查点"""
+    nodes = AuditNodes(retriever, tracer=tracer)
     workflow = StateGraph(AuditState)
 
     # 注册节点
@@ -565,9 +671,9 @@ def build_compliance_graph(retriever: HybridRetriever):
     )
     workflow.add_edge("report_aggregator", END)
 
-    # 编译状态图并挂载持久化内存检查点 (Checkpointer)
-    memory = MemorySaver()
-    return workflow.compile(checkpointer=memory)
+    # 编译状态图并挂载持久化 SQLite 检查点 (Checkpointer)
+    checkpointer = get_sqlite_checkpointer()
+    return workflow.compile(checkpointer=checkpointer)
 
 
 # ==========================================
@@ -580,10 +686,12 @@ class LangGraphComplianceAgent:
         self, 
         contract_content: str, 
         use_parent_child: bool = True,
-        sections: Optional[List[Any]] = None
+        sections: Optional[List[Any]] = None,
+        trace_id: Optional[str] = None
     ):
         self.contract_content = contract_content
         self.sections = sections
+        self.tracer = Tracer(trace_id=trace_id)
         print("[*] 正在为 LangGraph 初始化专属双阶段检索底座 (带父子块 Small-to-Big 索引与高保真物理坐标映射)...")
         self.retriever = HybridRetriever(
             contract_content, 
@@ -592,17 +700,32 @@ class LangGraphComplianceAgent:
             use_parent_child=use_parent_child,
             sections=sections
         )
-        self.graph = build_compliance_graph(self.retriever)
+        self.graph = build_compliance_graph(self.retriever, tracer=self.tracer)
 
     @classmethod
-    def from_file(cls, file_path: str | Path, use_parent_child: bool = True) -> "LangGraphComplianceAgent":
+    def from_file(
+        cls, 
+        file_path: str | Path, 
+        use_parent_child: bool = True,
+        trace_id: Optional[str] = None
+    ) -> "LangGraphComplianceAgent":
         """从 PDF / Markdown 文件构建，自动携带物理章节坐标与页码"""
         sections = DocumentParser.parse_file(file_path)
         text = DocumentParser.extract_full_text(file_path)
-        return cls(text, use_parent_child=use_parent_child, sections=sections)
+        return cls(text, use_parent_child=use_parent_child, sections=sections, trace_id=trace_id)
 
-    def audit(self, instruction: str, thread_id: str = "documind_default_session") -> ContractAuditReport:
+    def audit(
+        self, 
+        instruction: str, 
+        thread_id: str = "documind_default_session",
+        trace_id: Optional[str] = None
+    ) -> ContractAuditReport:
         """执行完整状态机审计流 (支持基于 thread_id 的检查点持久化与快照追溯)"""
+        active_trace_id = trace_id or self.tracer.trace_id
+        if trace_id and trace_id != self.tracer.trace_id:
+            self.tracer = Tracer(trace_id=trace_id)
+            self.graph = build_compliance_graph(self.retriever, tracer=self.tracer)
+
         initial_state: AuditState = {
             "contract_text": self.contract_content,
             "task_instruction": instruction,
@@ -616,7 +739,8 @@ class LangGraphComplianceAgent:
             "critic_notes": "",
             "retry_count": 0,
             "final_report": None,
-            "trace_logs": []
+            "trace_logs": [],
+            "trace_id": active_trace_id
         }
 
         # 触发 LangGraph 状态图流转 (携带持久化配置与显式递归上限，杜绝默认25步超限异常)
@@ -628,12 +752,22 @@ class LangGraphComplianceAgent:
         report_data = final_state.get("final_report", {})
         return ContractAuditReport.model_validate(report_data)
 
-    def stream_audit(self, instruction: str, thread_id: str = "documind_default_session"):
+    def stream_audit(
+        self, 
+        instruction: str, 
+        thread_id: str = "documind_default_session",
+        trace_id: Optional[str] = None
+    ):
         """
         以流式生成器形式运行 LangGraph 状态机
         每当一个节点计算完毕，实时 yield (node_name, state_delta)
         用于 FastAPI SSE (Server-Sent Events) 前端实时打字机与步骤渲染
         """
+        active_trace_id = trace_id or self.tracer.trace_id
+        if trace_id and trace_id != self.tracer.trace_id:
+            self.tracer = Tracer(trace_id=trace_id)
+            self.graph = build_compliance_graph(self.retriever, tracer=self.tracer)
+
         initial_state: AuditState = {
             "contract_text": self.contract_content,
             "task_instruction": instruction,
@@ -647,7 +781,8 @@ class LangGraphComplianceAgent:
             "critic_notes": "",
             "retry_count": 0,
             "final_report": None,
-            "trace_logs": []
+            "trace_logs": [],
+            "trace_id": active_trace_id
         }
         config = {
             "configurable": {"thread_id": thread_id},

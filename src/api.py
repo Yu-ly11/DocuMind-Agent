@@ -25,6 +25,28 @@ if root_dir not in sys.path:
 from src.parser import DocumentParser, ScannedPDFError
 from src.graph_agent import LangGraphComplianceAgent
 from src.schemas import ContractAuditReport
+from src.observability import new_trace_id, load_trace, TRACE_DIR
+
+# 进程内智能体缓存 (避免相同合同重复切片与重复生成 Embedding)
+_AGENT_CACHE: Dict[str, LangGraphComplianceAgent] = {}
+
+
+def get_or_create_agent(
+    contract_text: str, 
+    use_parent_child: bool = True,
+    trace_id: Optional[str] = None
+) -> LangGraphComplianceAgent:
+    """按 (doc_hash, use_parent_child) 单例缓存智能体与检索底座"""
+    import hashlib
+    doc_hash = hashlib.md5(contract_text.encode("utf-8")).hexdigest()[:16]
+    cache_key = f"{doc_hash}_{use_parent_child}"
+    if cache_key not in _AGENT_CACHE:
+        _AGENT_CACHE[cache_key] = LangGraphComplianceAgent(
+            contract_content=contract_text,
+            use_parent_child=use_parent_child,
+            trace_id=trace_id
+        )
+    return _AGENT_CACHE[cache_key]
 
 # 初始化 FastAPI 应用
 app = FastAPI(
@@ -37,7 +59,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -99,13 +121,21 @@ async def upload_contract(file: UploadFile = File(...)):
             detail=f"不支持的文件格式: '{file_ext}'。系统仅支持 .pdf, .md, .txt 合同文件。"
         )
 
-    # 写入系统临时安全文件
+    # 写入系统临时安全文件（清洗文件名防路径遍历）
+    safe_name = Path(file.filename or "upload").name
     temp_dir = Path(tempfile.gettempdir()) / "documind_uploads"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file_path = temp_dir / f"{uuid.uuid4().hex}_{file.filename}"
+    temp_file_path = temp_dir / f"{uuid.uuid4().hex}_{safe_name}"
 
     try:
         content = await file.read()
+        MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20MB 上限
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="文件超过 20MB 上限，请拆分后重试。"
+            )
+
         with open(temp_file_path, "wb") as f:
             f.write(content)
 
@@ -141,6 +171,15 @@ async def upload_contract(file: UploadFile = File(...)):
                 pass
 
 
+@app.get("/api/v1/audit/trace/{trace_id}", tags=["可观测性"])
+def get_audit_trace(trace_id: str):
+    """读取指定 Trace ID 的全链路结构化 JSONL 记录与聚合指标"""
+    trace_info = load_trace(trace_id)
+    if not trace_info:
+        raise HTTPException(status_code=404, detail=f"未找到 Trace ID: {trace_id}")
+    return trace_info
+
+
 @app.post("/api/v1/audit/sync", response_model=ContractAuditReport, tags=["审查业务"])
 def run_sync_audit(req: AuditRequest):
     """
@@ -151,12 +190,14 @@ def run_sync_audit(req: AuditRequest):
         raise HTTPException(status_code=400, detail="合同文本不能为空")
 
     thread_id = req.thread_id or f"sync_{uuid.uuid4().hex[:8]}"
+    trace_id = new_trace_id()
     try:
-        agent = LangGraphComplianceAgent(
-            contract_content=req.contract_text,
-            use_parent_child=req.use_parent_child
+        agent = get_or_create_agent(
+            contract_text=req.contract_text,
+            use_parent_child=req.use_parent_child,
+            trace_id=trace_id
         )
-        report = agent.audit(instruction=req.instruction, thread_id=thread_id)
+        report = agent.audit(instruction=req.instruction, thread_id=thread_id, trace_id=trace_id)
         return report
     except Exception as e:
         raise HTTPException(
@@ -181,6 +222,7 @@ async def run_stream_audit(req: AuditRequest):
         raise HTTPException(status_code=400, detail="合同文本不能为空")
 
     thread_id = req.thread_id or f"stream_{uuid.uuid4().hex[:8]}"
+    trace_id = new_trace_id()
 
     def event_generator() -> Generator[Dict[str, str], None, None]:
         try:
@@ -190,17 +232,19 @@ async def run_stream_audit(req: AuditRequest):
                 "data": json.dumps({
                     "stage": "init",
                     "message": "正在构建双阶段混合检索底座与状态机拓扑...",
-                    "thread_id": thread_id
+                    "thread_id": thread_id,
+                    "trace_id": trace_id
                 }, ensure_ascii=False)
             }
 
-            agent = LangGraphComplianceAgent(
-                contract_content=req.contract_text,
-                use_parent_child=req.use_parent_child
+            agent = get_or_create_agent(
+                contract_text=req.contract_text,
+                use_parent_child=req.use_parent_child,
+                trace_id=trace_id
             )
 
             # 2. 流式遍历状态图更新事件
-            for node_name, node_output in agent.stream_audit(req.instruction, thread_id=thread_id):
+            for node_name, node_output in agent.stream_audit(req.instruction, thread_id=thread_id, trace_id=trace_id):
                 # 针对不同节点提炼摘要信息供前端高亮显示
                 summary_data: Dict[str, Any] = {
                     "node": node_name,

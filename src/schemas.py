@@ -81,7 +81,9 @@ class ContractAuditReport(BaseModel):
     medium_risk_count: int = Field(default=0, description="中风险项数量")
     low_risk_count: int = Field(default=0, description="低风险项数量")
     unverified_count: int = Field(default=0, description="未完全闭环证据项数量 (需法务人工核验)")
+    infra_degraded_count: int = Field(default=0, description="因检索精排基础设施降级放行的证据项数量")
     needs_human_review: bool = Field(default=False, description="全篇合同是否存在未闭环证据项需要人工干预")
+    trace_id: Optional[str] = Field(None, description="全链路结构化可观测性 Trace ID")
     issues: List[ComplianceIssue] = Field(default_factory=list, description="发现的所有风险问题清单")
     passed_items: List[str] = Field(default_factory=list, description="审查合格的条款模块摘要")
     audit_time: str = Field(

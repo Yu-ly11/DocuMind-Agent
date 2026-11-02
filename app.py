@@ -19,9 +19,10 @@ if str(project_root) not in sys.path:
 import streamlit as st
 from src.parser import DocumentParser, ScannedPDFError
 from src.rag.hybrid_retriever import HybridRetriever
-from src.chat_engine import ContractChatEngine
+from src.chat_engine import ContractChatEngine, load_chat_history
 from src.graph_agent import LangGraphComplianceAgent
 from src.schemas import RiskLevel, ContractAuditReport
+from src.observability import new_trace_id, load_trace
 
 # 页面基础元数据配置
 st.set_page_config(
@@ -70,6 +71,8 @@ if "retriever" not in st.session_state:
     st.session_state["retriever"] = None
 if "chat_messages" not in st.session_state:
     st.session_state["chat_messages"] = []
+if "chat_session_id" not in st.session_state:
+    st.session_state["chat_session_id"] = "session_default"
 
 temp_dir = Path("tmp_contracts")
 temp_dir.mkdir(exist_ok=True)
@@ -243,6 +246,7 @@ if target_path and Path(target_path).exists():
             if st.button("🚀 启动 LangGraph 6节点状态机全流程审查", type="primary", use_container_width=True):
                 with st.status("🤖 DocuMind LangGraph 状态机正在流转中...", expanded=True) as status:
                     try:
+                        active_trace_id = new_trace_id()
                         agent = LangGraphComplianceAgent(contract_text, use_parent_child=use_pc, sections=all_sections)
                         node_labels = {
                             "task_planner": "🧭 **[Node 1: Task Planner]** 审查需求正交分解与规划完成",
@@ -255,7 +259,7 @@ if target_path and Path(target_path).exists():
                         
                         final_report_data = None
                         # 真正基于 LangGraph 状态事件流驱动进度渲染（单次执行，保证幂等与成本可控）
-                        for node_name, delta in agent.stream_audit(task_prompt):
+                        for node_name, delta in agent.stream_audit(task_prompt, thread_id="documind_audit_session", trace_id=active_trace_id):
                             msg = node_labels.get(node_name, f"⚙️ 节点 [{node_name}] 流转完成")
                             st.write(msg)
                             if "final_report" in delta and delta["final_report"]:
@@ -293,7 +297,24 @@ if target_path and Path(target_path).exists():
                     delta_color="inverse" if report.unverified_count > 0 else "normal"
                 )
 
+                if report.infra_degraded_count > 0:
+                    st.info(f"ℹ️ **【基础设施降级通知】**：本次审查有 {report.infra_degraded_count} 项条款触发重排超时/降级，已采用 BM25+向量保底机制放行，未阻断审查链路。")
+
                 st.info(f"**高管摘要 (Executive Summary)**: {report.audit_summary}")
+
+                # 链路可观测性 (Observability) 展开面板
+                if report.trace_id:
+                    trace_data = load_trace(report.trace_id)
+                    if trace_data:
+                        with st.expander(f"🔬 全链路可观测性透视 (Trace ID: `{report.trace_id}`)", expanded=False):
+                            t1, t2, t3 = st.columns(3)
+                            t1.metric("总执行耗时", f"{trace_data.get('total_duration_sec', 0):.2f} 秒")
+                            t2.metric("输入 Tokens", f"{trace_data.get('total_prompt_tokens', 0):,}")
+                            t3.metric("输出 Tokens", f"{trace_data.get('total_completion_tokens', 0):,}")
+                            
+                            st.markdown("**各状态机节点执行耗时瀑布流：**")
+                            for sp in trace_data.get("spans", []):
+                                st.write(f"- ⏱️ **[{sp.get('node_name')}]**: 耗时 `{sp.get('duration_ms', 0):.1f} ms` ｜ Tokens: `{sp.get('total_tokens', 0)}`")
 
                 # 逐项展开风险详情
                 st.markdown("### ⚠️ 风险条款逐项剖析与处置方案")
@@ -303,8 +324,12 @@ if target_path and Path(target_path).exists():
                         loc_desc = f"物理行号: **{issue.evidence.line_label}**" if issue.evidence.line_start is not None else "物理行号: **⚠️ 全文未精确定位**"
                         st.markdown(f"**📍 条款出处**: `{issue.evidence.clause_title}` ({loc_desc})")
                         
-                        if getattr(issue.evidence, "verification_status", "verified") == "unverified_needs_human_review":
+                        status_val = getattr(issue.evidence, "verification_status", "verified")
+                        status_str = status_val.value if hasattr(status_val, "value") else str(status_val)
+                        if status_str == "unverified_needs_human_review":
                             st.error("⚠️ **【证据未闭环警示】**：本项引用的原文在合同全文中未实现100%物理对齐，存在模型推理幻觉可能，已如实标记为【需人工核验】。")
+                        elif status_str == "infra_degraded":
+                            st.info("ℹ️ **【检索基础设施降级提示】**：本项基于 BM25+向量粗排真实召回并锚定，但由于 Reranker 交叉精排降级采用放行。")
 
                         st.warning(f"**逐字原文证据**: \"{issue.evidence.original_text}\"")
                         st.markdown(f"**💣 风险深度剖析**: {issue.risk_analysis}")
@@ -346,9 +371,21 @@ if target_path and Path(target_path).exists():
         # 工作流 B: 秒级交互 RAG 即问即答 Copilot
         # ==========================================
         with work_tab_chat:
-            st.caption("⚡ 适合场景：秒级提问互动。检索底座毫秒响应，打字机即时输出，精确锁定行号。")
+            st.caption("⚡ 适合场景：秒级提问互动。检索底座毫秒响应，打字机即时输出，精确锁定行号。支持 SQLite 持久化会话记忆。")
 
             chat_engine = ContractChatEngine(st.session_state["retriever"])
+
+            # 会话持久化与多轮状态管理
+            sess_c1, sess_c2 = st.columns([3, 1])
+            with sess_c1:
+                cur_sess = st.text_input("💬 会话 ID (Session ID)", value=st.session_state.get("chat_session_id", "session_default"), key="sess_input")
+                st.session_state["chat_session_id"] = cur_sess
+            with sess_c2:
+                if st.button("📂 恢复历史", use_container_width=True, help="从本地 SQLite 数据库中恢复该会话的历史问答"):
+                    restored = load_chat_history(st.session_state["chat_session_id"])
+                    st.session_state["chat_messages"] = restored
+                    st.success(f"已恢复 {len(restored)} 条历史问答！")
+                    st.rerun()
 
             # 快捷提问药丸
             st.markdown("**💡 快速提问推荐：**")
@@ -392,7 +429,8 @@ if target_path and Path(target_path).exists():
                 start_time = time.time()
                 token_stream, citations = chat_engine.query(
                     active_prompt, 
-                    history=st.session_state["chat_messages"]
+                    history=st.session_state["chat_messages"][:-1],
+                    session_id=st.session_state.get("chat_session_id", "session_default")
                 )
                 elapsed = time.time() - start_time
 

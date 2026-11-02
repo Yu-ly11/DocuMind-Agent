@@ -61,7 +61,16 @@ class ReActComplianceAgent:
             return self.search_executor(args.get("query", ""))
             
         elif name == "calc_penalty_risk":
-            res = calc_penalty_risk(**args)
+            amt = args.get("contract_total_amount")
+            rate = args.get("daily_rate")
+            days = args.get("overdue_days")
+            if isinstance(rate, (int, float)) and rate > 1:
+                rate = rate / 100.0
+            res = calc_penalty_risk(
+                contract_total_amount=float(amt) if (amt is not None and str(amt).replace(".", "", 1).isdigit()) else None,
+                daily_rate=float(rate) if (rate is not None and str(rate).replace(".", "", 1).isdigit()) else None,
+                overdue_days=int(days) if (days is not None and str(days).isdigit()) else None
+            )
             return json.dumps(res, ensure_ascii=False)
             
         return f"错误：未知的工具名 {name}"

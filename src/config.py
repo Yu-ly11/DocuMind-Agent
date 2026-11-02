@@ -1,14 +1,48 @@
 """
 DocuMind-Agent: 配置中心与模型 Client 管理
 支持 OpenAI 兼容格式 (OpenAI, DeepSeek, Kimi, 智谱等) 以及 Google Gemini 原生 SDK。
+统一管理环境代理、指数退避重试与模型凭证。
 """
 
 import os
+import sys
 from typing import Optional, Tuple, Any
 from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
+# 统一防御 Windows 终端输出 Emoji 触发 UnicodeEncodeError
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
+# 统一在配置中心收敛代理配置，防止国内网络或本地代理劫持请求
+os.environ["http_proxy"] = ""
+os.environ["https_proxy"] = ""
 
 # 加载 .env 环境变量
 load_dotenv()
+
+
+def call_with_retry(chat_create_fn, *args, **kwargs):
+    """
+    带指数退避的 LLM 调用包装器（最大重试 3 次，初试等待 1 秒，上限 8 秒）
+    """
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        reraise=True
+    )
+    def _call():
+        return chat_create_fn(*args, **kwargs)
+
+    return _call()
 
 
 class Settings:
