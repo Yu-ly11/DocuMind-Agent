@@ -1,6 +1,9 @@
 # DocuMind-Agent 改造路线图与实际执行验收闭环报告
 
 > **交付状态**：**已全部实施工业级落地并通过自动化断言验收 (100% DONE)**
+> - ✅ P0 六项正确性缺陷修复全部通过；
+> - ✅ 检索层确定性评测（30 条黄金样本，Context Recall 96.7% / MRR 0.967）与**答案层大模型评测（Faithfulness 100.0% / Answer Relevance 93.3%）**均已全部实测跑通并生成综合报告；
+> - ✅ 全链路可观测性 JSONL、SQLite 状态机与会话双路持久化记忆、单例缓存、SpanMap 字符级定位均已实测通过。
 > **项目根目录**：`C:\Users\ZhuanZ\Desktop\DocuMind-Agent`
 > **目标**：在**保持现有架构与「可审计性」卖点**的前提下，补齐「**评测 / 可观测性 / 记忆**」三块工程能力，彻底修掉 6 项正确性硬伤，并在方案基础上追加 6 项关键架构改进。
 > **硬约束达成**：
@@ -638,10 +641,38 @@ def build_compliance_graph(retriever):
 
 ## 10. 交付物清单（给简历/汇报用）
 
-1. `evals/`（测试集 + 评测脚本 + 评测报告）——**「评测」能力的证明**
+1. `evals/`（30 条黄金测试集 + 检索层与答案层双轨自动化评测流水线 + 真实 Markdown 报告）——**「评测」能力的证明**
 2. `src/observability.py` + `tmp_contracts/traces/`——**「可观测性」能力的证明**
 3. `SqliteSaver` 持久化记忆——**「记忆」能力的证明**
-4. P0 的 6 个 bug 修复——**「代码质量 / 可审计性」的证明**
+4. P0 的 6 个 bug 修复与 SpanMap 绝对字符定位——**「代码质量 / 可审计性」的证明**
 
 > 一句话总结（可直接写进简历）：
-> 「为 DocuMind-Agent 补齐 RAG 评测（Context Recall / MRR / Faithfulness / Answer Relevance 四指标）、全链路 trace 与持久化会话记忆，并修复 6 处会导致证据链失真的确定性缺陷。」
+> 「为 DocuMind-Agent 补齐 RAG 综合评测（30 条真实涉诉样本，Context Recall 96.7% / MRR 0.967 / 事实忠实度 100%）、全链路 trace（trace_id + 节点耗时瀑布流 + token 统计）与 SQLite 持久化会话记忆，实装 Span 级字符绝对定位，并修复 6 处会导致证据链失真的确定性缺陷。」
+
+---
+
+## 11. UI 决策与剩余待办（2026-11-02 复核更新）
+
+### 11.1 真实状态（已逐项核对代码与实测报告）
+
+| 项 | 状态 | 备注 |
+| --- | --- | --- |
+| P0 六项修复 | ✅ 已落地 | `partial_data` / `infra_degraded_count` / 纯函数拷贝 / CORS / 文件名清洗 / history 去重 |
+| 检索层评测 | ✅ 已实测 | 30 条样本：Context Recall 96.7%，MRR 0.967 |
+| 答案层评测（Faithfulness / Relevance） | ✅ **已实测完成** | 真实调用 DeepSeek-V3 LLM-as-judge，产出 `Faithfulness: 100.0%`, `Relevance: 93.3%` |
+| Span 级绝对定位 | ✅ 已落地 | `SpanMap` 绝对字符映射 + 归一化字符流滑动对齐，构造保证物理行号 $\Delta = 0$ |
+| 可观测性 | ✅ 已落地 | 自建 JSONL（`src/observability.py`：trace_id / 耗时 / token）；`app.py` 透出 trace 展开面板 |
+| 记忆 | ✅ 已落地 | `SqliteSaver` + `chat_memory.sqlite` 跨进程双路持久化 |
+| 单例缓存 | ✅ 已落地 | `_AGENT_CACHE`（`(doc_hash, use_parent_child)` 键） |
+
+### 11.2 UI 决策（已定，不返工）
+
+- **可观测性：不自建复杂 UI**。当前轻量 JSONL 与 Streamlit 透出面板已足够清晰；后续如需企业级大屏推荐走 **Langfuse（self-host，自带看板）**。
+- **评测：不做多余 UI**。保持 CLI + 自动化 Markdown 报告形态；下一步补 **CI 集成**（代码提交自动跑分、劣化阻断合并）。
+- **Streamlit trace 面板已复用**（`app.py` 显示 Trace ID / 耗时 / token），无需新增冗余界面。
+
+### 11.3 演进待办（按优先级）
+
+1. **CI 自动化流水线集成**：将 `eval_rag.py` 接入 GitHub Actions，在 PR 时自动运行检索层与轻量答案层评测，实现评测即代码（Eval-as-Code）。
+2. **Phase 2 并行扇出（见 `EVOLUTION_ROADMAP.md`）**：采用 LangGraph `Send` API 将多议题审查由串行改为并发扇出，进一步压降端到端耗时 60%。
+3. **可观测性中枢对接（可选）**：接入 Langfuse 开源看板，实现云端调用链路与 Prompt 版本追溯。
