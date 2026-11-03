@@ -647,23 +647,26 @@ def build_compliance_graph(retriever):
 4. P0 的 6 个 bug 修复与 SpanMap 绝对字符定位——**「代码质量 / 可审计性」的证明**
 
 > 一句话总结（可直接写进简历）：
-> 「为 DocuMind-Agent 补齐 RAG 综合评测（30 条真实涉诉样本，Context Recall 96.7% / MRR 0.967 / 事实忠实度 100%）、全链路 trace（trace_id + 节点耗时瀑布流 + token 统计）与 SQLite 持久化会话记忆，实装 Span 级字符绝对定位，并修复 6 处会导致证据链失真的确定性缺陷。」
+> 「为 DocuMind-Agent 补齐 RAG 综合评测（30 条真实涉诉样本，Context Recall 96.7% / MRR 0.967 / 事实忠实度 98.7% / 答案切题度 100.0%）、全链路 trace（trace_id + 节点耗时瀑布流 + token 统计）与 SQLite 持久化会话记忆，实装 Span 级字符绝对定位，并修复 6 处会导致证据链失真的确定性缺陷。」
 
 ---
 
-## 11. UI 决策与剩余待办（2026-11-02 复核更新）
+## 11. UI 决策与交付闭环清单（2026-11-03 最新复核）
 
 ### 11.1 真实状态（已逐项核对代码与实测报告）
 
 | 项 | 状态 | 备注 |
 | --- | --- | --- |
 | P0 六项修复 | ✅ 已落地 | `partial_data` / `infra_degraded_count` / 纯函数拷贝 / CORS / 文件名清洗 / history 去重 |
-| 检索层评测 | ✅ 已实测 | 30 条样本：Context Recall 96.7%，MRR 0.967 |
-| 答案层评测（Faithfulness / Relevance） | ✅ **已实测完成** | 真实调用 DeepSeek-V3 LLM-as-judge，产出 `Faithfulness: 100.0%`, `Relevance: 93.3%` |
+| 检索层评测 | ✅ 已实测 | 30 条样本全量实测：Context Recall 96.7%，MRR 0.967 |
+| 答案层评测（Faithfulness / Relevance） | ✅ **已实测完成** | 30 条样本真实调用 DeepSeek-V3 LLM-as-judge，产出 `Faithfulness: 98.7%`, `Answer Relevance: 100.0%` |
 | Span 级绝对定位 | ✅ 已落地 | `SpanMap` 绝对字符映射 + 归一化字符流滑动对齐，构造保证物理行号 $\Delta = 0$ |
 | 可观测性 | ✅ 已落地 | 自建 JSONL（`src/observability.py`：trace_id / 耗时 / token）；`app.py` 透出 trace 展开面板 |
 | 记忆 | ✅ 已落地 | `SqliteSaver` + `chat_memory.sqlite` 跨进程双路持久化 |
 | 单例缓存 | ✅ 已落地 | `_AGENT_CACHE`（`(doc_hash, use_parent_child)` 键） |
+| 死代码接线与健壮重试 | ✅ **已落地** | 统一收敛至 `get_llm_client()` 与 `call_with_retry(timeout=60)`，彻底消灭裸调用 |
+| 标准统一 Logging | ✅ **已落地** | 业务模块 `print` 全面收敛为 `logger.info`，并注入 Windows UTF-8 安全流防御 |
+| CI 自动化门禁 | ✅ **已落地** | `.github/workflows/eval.yml` 分层流水线就绪 |
 
 ### 11.2 UI 决策（已定，不返工）
 
@@ -673,6 +676,56 @@ def build_compliance_graph(retriever):
 
 ### 11.3 演进待办（按优先级）
 
-1. **CI 自动化流水线集成**：将 `eval_rag.py` 接入 GitHub Actions，在 PR 时自动运行检索层与轻量答案层评测，实现评测即代码（Eval-as-Code）。
-2. **Phase 2 并行扇出（见 `EVOLUTION_ROADMAP.md`）**：采用 LangGraph `Send` API 将多议题审查由串行改为并发扇出，进一步压降端到端耗时 60%。
-3. **可观测性中枢对接（可选）**：接入 Langfuse 开源看板，实现云端调用链路与 Prompt 版本追溯。
+1. **Phase 2 并行扇出（见 `EVOLUTION_ROADMAP.md`）**：采用 LangGraph `Send` API 将多议题审查由串行改为并发扇出，进一步压降端到端耗时 60%。
+2. **可观测性中枢对接（可选）**：接入 Langfuse 开源看板，实现云端调用链路与 Prompt 版本追溯。
+
+---
+
+## 12. 给 Gemini 的任务书闭环记录（已全部交付 · 2026-11-03）
+
+> **前置**：`.env` 已配好 SiliconFlow key（已确认）。
+> **执行结论**：任务 0、1、2、3 已全部高标准交付落地并闭环验证。
+> **红线准则**：未动 README 叙事、未动 `tests/` 既有断言，且**严格遵循指令未执行 git commit / push 远程提交**。
+
+### 任务 0：统一评测数据口径（✅ 已闭环完成）
+- **执行情况**：完整执行 30 条法务黄金评测样本流水线，产出同源同质的最新报告 `evals/reports/eval_report.md`。
+- **真实指标**：
+  - Context Recall: **96.7%**
+  - MRR: **0.967**
+  - Faithfulness: **98.7%**
+  - Answer Relevance: **100.0%**
+- **口径对齐**：本文档第 10、11 节数据已全部同步更新，彻底消除数字打架。
+
+---
+
+### 任务 1：CI 集成（Eval-as-Code）（✅ 已闭环完成）
+- **执行情况**：创建 `.github/workflows/eval.yml`。
+- **分层设计**：
+  - **PR / 推送**：自动执行核心单元测试 (`pytest tests/`) + 轻量检索评测 (`--retrieval-only`)，0 Token 成本且 30 秒快速反馈；
+  - **Main / 手动 dispatch**：支持传入密钥自动跑 30 条全量大模型评测并归档报告 Artifacts。
+
+---
+
+### 任务 2：`config.py` 死代码接线（✅ 已闭环完成）
+- **执行情况**：
+  - `src/graph_agent.py`、`src/agent.py`、`src/chat_engine.py`、`evals/judge.py`、`src/rag/hybrid_retriever.py` 全部统一接入 `from src.config import get_llm_client, call_with_retry`；
+  - 非流式大模型与嵌入调用全部包装 `call_with_retry`，默认注入 `timeout=60` 并提供 3 次指数退避容错。
+
+---
+
+### 任务 3：`print` 换成 `logging`（✅ 已闭环完成）
+- **执行情况**：
+  - `src/config.py` 配置全局 logger，绑定 `sys.stdout` 并注入 UTF-8 编码安全流防御；
+  - 业务核心模块中的调试 `print(...)` 全部替换为 `logger.info(...)` / `logger.warning(...)`，规范统一输出格式（带时间戳、日志级别与模块名称）。
+
+---
+
+### 任务 4（可选）：Langfuse 接入
+
+`pip install langfuse`，在 `src/observability.py` 加「检测到 `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` 环境变量时上报 Langfuse，否则继续本地 JSONL」的双通道，获得自带 UI 的 trace 瀑布与成本看板（不重写前端）。
+
+---
+
+### 任务 5（后期，见 `EVOLUTION_ROADMAP.md`）：Phase 2 并行扇出
+
+LangGraph `Send` API 把多议题串行改为并发扇出，压降端到端耗时约 60%。属认知升维，等任务 0–4 稳定后再启动。

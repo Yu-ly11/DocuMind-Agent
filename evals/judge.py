@@ -7,7 +7,15 @@ DocuMind-Agent: 答案层大模型评测员 (LLM-as-a-Judge)
 
 import json
 import re
+import sys
+from pathlib import Path
 from typing import Dict, Any
+
+root_dir = str(Path(__file__).resolve().parent.parent)
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+
+from src.config import call_with_retry, logger
 
 
 def _clean_and_parse_json(raw: str) -> Dict[str, Any]:
@@ -56,7 +64,8 @@ def judge_faithfulness(client, model: str, context: str, answer: str) -> Dict[st
 {answer}
 """
     try:
-        resp = client.chat.completions.create(
+        resp = call_with_retry(
+            client.chat.completions.create,
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
@@ -92,7 +101,8 @@ def judge_answer_relevance(client, model: str, question: str, answer: str) -> Di
 {answer}
 """
     try:
-        resp = client.chat.completions.create(
+        resp = call_with_retry(
+            client.chat.completions.create,
             model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,

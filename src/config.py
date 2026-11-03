@@ -6,6 +6,7 @@ DocuMind-Agent: 配置中心与模型 Client 管理
 
 import os
 import sys
+import logging
 from typing import Optional, Tuple, Any
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -29,11 +30,22 @@ os.environ["https_proxy"] = ""
 # 加载 .env 环境变量
 load_dotenv()
 
+# ==========================================
+# 统一日志基础设施 (支持 UTF-8 控制台与模块级结构化日志)
+# ==========================================
+_log_handler = logging.StreamHandler(sys.stdout)
+_log_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
+logger = logging.getLogger("documind")
+
 
 def call_with_retry(chat_create_fn, *args, **kwargs):
     """
-    带指数退避的 LLM 调用包装器（最大重试 3 次，初试等待 1 秒，上限 8 秒）
+    带指数退避与默认 60 秒超时的 LLM 调用包装器（最大重试 3 次，初试等待 1 秒，上限 8 秒）
     """
+    if "timeout" not in kwargs:
+        kwargs["timeout"] = 60
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),

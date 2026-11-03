@@ -15,8 +15,8 @@ root_dir = str(Path(__file__).resolve().parent.parent)
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
-from openai import OpenAI
 from dotenv import load_dotenv
+from src.config import get_llm_client, call_with_retry, logger
 from src.rag.hybrid_retriever import HybridRetriever
 from src.parser import DocumentParser
 from src.tools.compliance_tools import (
@@ -36,21 +36,17 @@ class ReActComplianceAgent:
     @classmethod
     def from_file(cls, file_path: str | Path) -> "ReActComplianceAgent":
         """工厂方法：通过高保真解析器自动识别并抽取 PDF / Markdown / TXT 文档全文"""
-        print(f"[*] 正在调用 DocumentParser 高保真解析文档: {file_path}")
+        logger.info(f"[*] 正在调用 DocumentParser 高保真解析文档: {file_path}")
         content = DocumentParser.extract_full_text(file_path)
         return cls(content)
 
     def __init__(self, contract_content: str):
-        self.client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL")
-        )
-        self.model = os.getenv("MODEL_NAME")
+        self.provider, self.client, self.model = get_llm_client()
         
         # 1. 为当前合同初始化最强双阶段混合检索器 (jieba + BGE-M3 + 磁盘持久化 + Reranker)
-        print("[*] 正在为合同构建/加载两阶段混合检索持久化索引...")
+        logger.info("[*] 正在为合同构建/加载两阶段混合检索持久化索引...")
         self.retriever = HybridRetriever(contract_content, chunk_size=350, overlap=50)
-        print(f"[*] 索引就绪！共管理 {len(self.retriever.chunks)} 个语义块。\n")
+        logger.info(f"[*] 索引就绪！共管理 {len(self.retriever.chunks)} 个语义块。")
 
         # 2. 优雅组装工具箱 (架构重构：从 tools 模块动态获取)
         search_schema, self.search_executor = build_search_contract_tool(self.retriever)
@@ -102,13 +98,15 @@ class ReActComplianceAgent:
         step = 0
         while step < max_steps:
             step += 1
-            print(f"--- 🔄 [第 {step}/{max_steps} 轮思考] 智能体正在决策下一步动作... ---")
+            logger.info(f"--- 🔄 [第 {step}/{max_steps} 轮思考] 智能体正在决策下一步动作... ---")
             
-            response = self.client.chat.completions.create(
+            response = call_with_retry(
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=messages,
                 tools=self.tools,
-                tool_choice="auto"
+                tool_choice="auto",
+                timeout=60
             )
             
             msg = response.choices[0].message
@@ -116,19 +114,19 @@ class ReActComplianceAgent:
 
             # 检查大模型是想交卷，还是想继续调工具？
             if not msg.tool_calls:
-                print("✅ 智能体判断所有事实和计算均已齐备，决定退出循环，交付最终审查结论！\n")
+                logger.info("✅ 智能体判断所有事实和计算均已齐备，决定退出循环，交付最终审查结论！\n")
                 return msg.content
 
             # 如果大模型呼叫了工具，逐一执行并把结果递回
             for tool_call in msg.tool_calls:
                 f_name = tool_call.function.name
                 f_args = json.loads(tool_call.function.arguments)
-                print(f"  👉 [自主决策] 触发工具: 【{f_name}】")
-                print(f"     [下发参数]: {f_args}")
+                logger.info(f"  👉 [自主决策] 触发工具: 【{f_name}】")
+                logger.info(f"     [下发参数]: {f_args}")
 
                 # 本地执行真实代码
                 tool_output = self._execute_tool(f_name, f_args)
-                print(f"     [工具执行反馈 (截取60字)]: {tool_output[:60]}...")
+                logger.info(f"     [工具执行反馈 (截取60字)]: {tool_output[:60]}...")
 
                 # 将工具产出以 role: tool 角色回传给大模型
                 messages.append({
@@ -147,7 +145,7 @@ if __name__ == "__main__":
     with open(sample_path, "r", encoding="utf-8") as f:
         contract_text = f.read()
 
-    print(f"[*] 🚀 启动 DocuMind-Agent，正在载入长篇标的合同: {sample_path.name} (全文共 {len(contract_text)} 字)...")
+    logger.info(f"[*] 🚀 启动 DocuMind-Agent，正在载入长篇标的合同: {sample_path.name} (全文共 {len(contract_text)} 字)...")
 
     # 2. 实例化智能体
     agent = ReActComplianceAgent(contract_text)
@@ -163,7 +161,7 @@ if __name__ == "__main__":
 
     final_report = agent.audit(task)
     
-    print("\n" + "=" * 60)
-    print("📋 DocuMind-Agent 面对万字长篇合同交付的终极审查报告")
-    print("=" * 60)
-    print(final_report)
+    logger.info("\n" + "=" * 60)
+    logger.info("📋 DocuMind-Agent 面对万字长篇合同交付的终极审查报告")
+    logger.info("=" * 60)
+    logger.info(final_report)

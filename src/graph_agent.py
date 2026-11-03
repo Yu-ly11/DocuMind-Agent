@@ -16,7 +16,6 @@ import sqlite3
 from pathlib import Path
 from typing import TypedDict, Annotated, List, Dict, Any, Optional
 import time
-from openai import OpenAI
 from dotenv import load_dotenv
 
 # 兼容 Windows 平台 GBK 终端 Emoji 输出，避免 UnicodeEncodeError
@@ -38,6 +37,7 @@ root_dir = str(Path(__file__).resolve().parent.parent)
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
+from src.config import get_llm_client, call_with_retry, logger
 from src.rag.hybrid_retriever import HybridRetriever
 from src.parser import DocumentParser
 from src.tools.compliance_tools import calc_penalty_risk
@@ -83,19 +83,14 @@ class AuditNodes:
     """封装 LangGraph 五大节点的业务逻辑与 LLM 交互"""
 
     def __init__(self, retriever: HybridRetriever, tracer: Optional[Tracer] = None):
-        self.client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL")
-        )
-        self.model = os.getenv("MODEL_NAME", "deepseek-ai/DeepSeek-V3")
+        self.provider, self.client, self.model = get_llm_client()
         self.retriever = retriever
         self.tracer = tracer
 
     def task_planner_node(self, state: AuditState) -> Dict[str, Any]:
         """【节点 1: Task Planner】将审查需求拆解为正交的法务审查子任务"""
         t0 = time.time()
-        print("\n" + "=" * 60)
-        print("🧭 [Node 1: Task Planner] 正在对合同合规任务进行维度拆解与动态规划...")
+        logger.info("🧭 [Node 1: Task Planner] 正在对合同合规任务进行维度拆解与动态规划...")
         
         prompt = f"""
 你是一名资深企业法务架构师。请阅读用户的合规审查要求：
@@ -111,7 +106,8 @@ class AuditNodes:
   ]
 }}
 """
-        response = self.client.chat.completions.create(
+        response = call_with_retry(
+            self.client.chat.completions.create,
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
@@ -129,9 +125,9 @@ class AuditNodes:
                 {"id": 2, "topic": "违约金风险", "query": "每日逾期违约金比例与累计上限"}
             ]
 
-        print(f"  🎯 成功规划出 {len(tasks)} 个深度审查议题：")
+        logger.info(f"  🎯 成功规划出 {len(tasks)} 个深度审查议题：")
         for t in tasks:
-            print(f"     - [{t['topic']}] 检索意图: '{t['query']}'")
+            logger.info(f"     - [{t['topic']}] 检索意图: '{t['query']}'")
 
         dur_ms = (time.time() - t0) * 1000
         if self.tracer:
@@ -160,14 +156,14 @@ class AuditNodes:
         task_info = state["plan_tasks"][task_idx] if task_idx < len(state["plan_tasks"]) else {}
         topic = task_info.get("topic", "专项条款")
 
-        print(f"\n🔍 [Node 2: Hybrid Retriever] 正在执行多跳召回 (议题: {topic} | Query: '{query}')...")
+        logger.info(f"🔍 [Node 2: Hybrid Retriever] 正在执行多跳召回 (议题: {topic} | Query: '{query}')...")
         # 调用两阶段精排，并回溯父块上下文
         hits = self.retriever.retrieve(query, top_k=2, mode="hybrid_rerank", return_parent=True)
 
         clauses = []
         for rank, (doc, score) in enumerate(hits, start=1):
             clauses.append({"rank": rank, "content": doc, "score": score})
-            print(f"  📄 [命中条款 Top{rank} | 得分: {score:.4f}]: {doc[:80]}...")
+            logger.info(f"  📄 [命中条款 Top{rank} | 得分: {score:.4f}]: {doc[:80]}...")
 
         dur_ms = (time.time() - t0) * 1000
         if self.tracer:
@@ -195,7 +191,7 @@ class AuditNodes:
         if "违约" not in topic and "赔偿" not in topic and "款" not in topic and "%" not in clauses_text:
             return {"penalty_cert": None}
 
-        print("\n🧮 [Node 3: Penalty Calculator] 正在扫描违约金参数，呼叫本地确定性风控算子...")
+        logger.info("🧮 [Node 3: Penalty Calculator] 正在扫描违约金参数，呼叫本地确定性风控算子...")
         # 借助大模型精确抽取参数 (金额、日利率、天数)，未在合同明确载明必须填 null，严禁编造默认值
         prompt = f"""
 请从以下合同条款中，抽取出违约金计算三要素。如果合同中未明确约定对应要素，对应字段必须输出 null，严禁凭空编造！
@@ -215,11 +211,13 @@ class AuditNodes:
 }}
 """
         try:
-            resp = self.client.chat.completions.create(
+            resp = call_with_retry(
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
                 response_format={"type": "json_object"},
-                temperature=0.0
+                temperature=0.0,
+                timeout=60
             )
             args = json.loads(resp.choices[0].message.content)
 
@@ -259,21 +257,21 @@ class AuditNodes:
                 overdue_days=days
             )
             if cert["status"] == "success":
-                print(f"  ✅ [本地算子出具风控凭证]:")
-                print(f"     合同额: ￥{cert['contract_total_amount']} | 日费率: {cert['daily_rate_percent']} | 测算逾期: {cert['overdue_days']} 天")
-                print(f"     累计违约金: ￥{cert['calculated_total_penalty']} (占合同额 {cert['penalty_ratio_of_contract']})")
-                print(f"     法务风控提示: {cert['legal_risk_warning'][:50]}...")
+                logger.info("  ✅ [本地算子出具风控凭证]:")
+                logger.info(f"     合同额: ￥{cert['contract_total_amount']} | 日费率: {cert['daily_rate_percent']} | 测算逾期: {cert['overdue_days']} 天")
+                logger.info(f"     累计违约金: ￥{cert['calculated_total_penalty']} (占合同额 {cert['penalty_ratio_of_contract']})")
+                logger.info(f"     法务风控提示: {cert['legal_risk_warning'][:50]}...")
             elif cert["status"] == "partial_data":
-                print(f"  ℹ️ [本地算子部分测算]: 日违约金 ￥{cert.get('daily_penalty')}，系统拒绝编造逾期天数。")
+                logger.info(f"  ℹ️ [本地算子部分测算]: 日违约金 ￥{cert.get('daily_penalty')}，系统拒绝编造逾期天数。")
             else:
-                print(f"  ℹ️ [本地算子提示]: {cert['legal_risk_warning']}")
+                logger.info(f"  ℹ️ [本地算子提示]: {cert['legal_risk_warning']}")
 
             return {
                 "penalty_cert": cert,
                 "trace_logs": state.get("trace_logs", []) + [f"[Calculator] 测算状态: {cert['status']}, 违约金占合同额: {cert.get('penalty_ratio_of_contract', '未明确')}"]
             }
         except Exception as e:
-            print(f"  ⚠️ 参数抽取异常: {e}")
+            logger.warning(f"  ⚠️ 参数抽取异常: {e}")
             return {"penalty_cert": None}
 
     def clause_evaluator_node(self, state: AuditState) -> Dict[str, Any]:
@@ -284,7 +282,7 @@ class AuditNodes:
         clauses_text = "\n\n".join([f"【条款 {c['rank']}】:\n{c['content']}" for c in state["retrieved_clauses"]])
         calc_text = json.dumps(state["penalty_cert"], ensure_ascii=False) if state.get("penalty_cert") else "无数学计算项"
 
-        print(f"\n⚖️ [Node 4: Clause Evaluator] 正在对照法条进行合规评估 (议题: {topic})...")
+        logger.info(f"\n⚖️ [Node 4: Clause Evaluator] 正在对照法条进行合规评估 (议题: {topic})...")
         prompt = f"""
 你是一名资深企业法务合规审查总监。请依据以下提供的真实合同条款原文及数学测算凭证，对此项议题进行合规判定。
 
@@ -313,11 +311,13 @@ class AuditNodes:
   "suggested_replacement": "推荐替换的标准法言法语表述"
 }}
 """
-        response = self.client.chat.completions.create(
+        response = call_with_retry(
+            self.client.chat.completions.create,
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
-            temperature=0.1
+            temperature=0.1,
+            timeout=60
         )
         try:
             issue_dict = json.loads(response.choices[0].message.content)
@@ -330,12 +330,12 @@ class AuditNodes:
                 issue_dict["evidence"]["page_number"] = loc["page"]
                 issue_dict["evidence"]["verification_status"] = "verified" if loc["status"] == "located" else "unverified_needs_human_review"
 
-            print(f"  🚨 发现风险: 【{issue_dict.get('risk_level', '未知')}】 {issue_dict.get('title')}")
+            logger.info(f"  🚨 发现风险: 【{issue_dict.get('risk_level', '未知')}】 {issue_dict.get('title')}")
             if loc["status"] == "located":
-                print(f"     [物理证据锚定]: 第 {loc['line_start']} - {loc['line_end']} 行 | 真实出处对齐")
+                logger.info(f"     [物理证据锚定]: 第 {loc['line_start']} - {loc['line_end']} 行 | 真实出处对齐")
             else:
-                print(f"     [物理证据锚定]: ⚠️ 未能在原文准确定位物理行号，系统已如实标记为【未核验(需人工复核)】")
-            print(f"     原文摘录: \"{orig_text[:50]}...\"")
+                logger.info(f"     [物理证据锚定]: ⚠️ 未能在原文准确定位物理行号，系统已如实标记为【未核验(需人工复核)】")
+            logger.info(f"     原文摘录: \"{orig_text[:50]}...\"")
         except Exception:
             loc = self.retriever.get_chunk_location(clauses_text[:60])
             issue_dict = {
@@ -364,7 +364,7 @@ class AuditNodes:
 
     def critic_node(self, state: AuditState) -> Dict[str, Any]:
         """【节点 5: Critic 反思检验】检验事实依据充分度，三态路由（通过 / 改写重试 / 熔断人工标记），隔离量纲冲突"""
-        print(f"\n🧐 [Node 5: Critic] 正在对当前审查结论进行严格的【反思检验 (Self-Reflection)】...")
+        logger.info("🧐 [Node 5: Critic] 正在对当前审查结论进行严格的【反思检验 (Self-Reflection)】...")
         task_idx = state["current_task_idx"]
         latest_issue = state["accumulated_issues"][-1] if state["accumulated_issues"] else {}
         evidence_text = latest_issue.get("evidence", {}).get("original_text", "")
@@ -391,11 +391,11 @@ class AuditNodes:
         # 分支 A: 证据链闭环且置信度达标 -> 放行推进
         if confidence_ok:
             if infra_degraded:
-                print("  ℹ️ [Critic 降级放行]：Reranker 服务降级，已基于 RRF 证据放行，标记为【精排降级】！")
+                logger.info("  ℹ️ [Critic 降级放行]：Reranker 服务降级，已基于 RRF 证据放行，标记为【精排降级】！")
                 log_tag = "[Critic] 检索服务降级放行"
                 status_to_set = VerificationStatus.INFRA_DEGRADED
             else:
-                print("  ✅ [Critic 检验通过]：证据链真实且可追溯，准予放行并推进下一议题！")
+                logger.info("  ✅ [Critic 检验通过]：证据链真实且可追溯，准予放行并推进下一议题！")
                 log_tag = "[Critic] 议题核准通过"
                 status_to_set = VerificationStatus.VERIFIED
 
@@ -425,17 +425,19 @@ class AuditNodes:
         # 分支 B: 校验失败，且尚未达到 3 次重试上限 -> 触发 Query 自适应改写重试
         if retry_count < 3:
             new_retry = retry_count + 1
-            print(f"  ⚠️ [Critic 拦截重试 ({new_retry}/3 轮)]：法条上下文置信度不足或证据不可溯，触发 Query 自适应改写！")
+            logger.info(f"  ⚠️ [Critic 拦截重试 ({new_retry}/3 轮)]：法条上下文置信度不足或证据不可溯，触发 Query 自适应改写！")
             
             old_query = state["current_query"]
             rewrite_prompt = f"原搜索 Query '{old_query}' 召回结果模糊或证据不闭环。请改写为一个包含更精确法言法语和核心实体的搜索词，仅输出改写后的 Query 文本，严禁多余废话。"
-            resp = self.client.chat.completions.create(
+            resp = call_with_retry(
+                self.client.chat.completions.create,
                 model=self.model,
                 messages=[{"role": "user", "content": rewrite_prompt}],
-                temperature=0.3
+                temperature=0.3,
+                timeout=60
             )
             rewritten_q = resp.choices[0].message.content.strip().replace('"', '')
-            print(f"  🔄 [Query 改写演变]: '{old_query}' ➡️ '{rewritten_q}'")
+            logger.info(f"  🔄 [Query 改写演变]: '{old_query}' ➡️ '{rewritten_q}'")
 
             # 剔除刚生成的未达标草稿，准备回溯重捞
             updated_issues = state["accumulated_issues"][:-1]
@@ -449,8 +451,8 @@ class AuditNodes:
 
         # 分支 C: 达到 3 次重试上限仍未闭环 -> 触发熔断通道，绝不假装通过！
         # Fail-Closed 机制：如实标记为 UNVERIFIED，给法务最真实透明的风控标记
-        print("  🚨 [Critic 熔断]：已重试 3 轮仍未在原文闭环证据链，系统拒绝伪造可信度！")
-        print("     已将该议题明确标记为【未核验-需人工复核】，强制收敛并推进下一项。")
+        logger.info("  🚨 [Critic 熔断]：已重试 3 轮仍未在原文闭环证据链，系统拒绝伪造可信度！")
+        logger.info("     已将该议题明确标记为【未核验-需人工复核】，强制收敛并推进下一项。")
         updated_issues = list(state.get("accumulated_issues", []))
         if updated_issues:
             target_issue = updated_issues[-1]
@@ -481,8 +483,7 @@ class AuditNodes:
 
     def report_aggregator_node(self, state: AuditState) -> Dict[str, Any]:
         """【报告收敛节点】将所有累积议题聚合为 Pydantic v2 强契约输出（Fail-Closed 报表闸门与动态摘要）"""
-        print("\n" + "=" * 60)
-        print("📑 [Report Aggregator] 所有议题审查与反思全部收敛，正在组装最终强契约审计报告...")
+        logger.info("📑 [Report Aggregator] 所有议题审查与反思全部收敛，正在组装最终强契约审计报告...")
         issues_raw = state.get("accumulated_issues", [])
         
         # 统计风险等级
@@ -604,7 +605,7 @@ class AuditNodes:
             trace_id=trace_id_val
         )
 
-        print(f"🎉 审查报告生成就绪！综合定级: 【{report.overall_risk.value}】 (高危: {high_cnt} | 中危: {med_cnt})")
+        logger.info(f"🎉 审查报告生成就绪！综合定级: 【{report.overall_risk.value}】 (高危: {high_cnt} | 中危: {med_cnt})")
         return {"final_report": report.model_dump()}
 
 
@@ -692,7 +693,7 @@ class LangGraphComplianceAgent:
         self.contract_content = contract_content
         self.sections = sections
         self.tracer = Tracer(trace_id=trace_id)
-        print("[*] 正在为 LangGraph 初始化专属双阶段检索底座 (带父子块 Small-to-Big 索引与高保真物理坐标映射)...")
+        logger.info("[*] 正在为 LangGraph 初始化专属双阶段检索底座 (带父子块 Small-to-Big 索引与高保真物理坐标映射)...")
         self.retriever = HybridRetriever(
             contract_content, 
             chunk_size=180, 

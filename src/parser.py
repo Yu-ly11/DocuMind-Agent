@@ -14,6 +14,7 @@ import hashlib
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from pydantic import BaseModel, Field
+from src.config import logger
 
 
 class ScannedPDFError(Exception):
@@ -169,7 +170,7 @@ class DocumentParser:
         # 4. 扫描件防御：可提取性检查与自动 OCR 智能降级转录
         avg_chars = total_extracted_chars / total_pages if total_pages > 0 else 0
         if avg_chars < min_chars_per_page:
-            print(f"[*] 检测到纯图片扫描件 (平均每页仅 {avg_chars:.1f} 字符)，正在无缝启动 RapidOCR 引擎执行逐页图文转录...")
+            logger.info(f"[*] 检测到纯图片扫描件 (平均每页仅 {avg_chars:.1f} 字符)，正在无缝启动 RapidOCR 引擎执行逐页图文转录...")
             try:
                 return cls._parse_pdf_with_ocr(file_path)
             except Exception as ocr_err:
@@ -203,14 +204,14 @@ class DocumentParser:
         cache_file = cache_dir / f"{file_hash}.json"
 
         if cache_file.exists():
-            print(f"[*] [OCR 磁盘缓存命中] 检测到该扫描件已完成识别 (指纹: {file_hash[:8]})，瞬间完成加载！")
+            logger.info(f"[*] [OCR 磁盘缓存命中] 检测到该扫描件已完成识别 (指纹: {file_hash[:8]})，瞬间完成加载！")
             try:
                 with open(cache_file, "r", encoding="utf-8") as f:
                     cached_data = json.load(f)
                 lines = [DocumentLine(**item) for item in cached_data]
                 return cls._segment_by_clauses(lines)
             except Exception as e:
-                print(f"[警告] 读取 OCR 缓存异常，重新执行识别: {e}")
+                logger.warning(f"[警告] 读取 OCR 缓存异常，重新执行识别: {e}")
 
         # 3. 未命中缓存，启动本地 RapidOCR 识别
         import pymupdf
@@ -225,7 +226,7 @@ class DocumentParser:
         for page_idx in range(total_pages):
             page = doc[page_idx]
             page_num = page_idx + 1
-            print(f"[*] [OCR 识别中] 正在转录第 {page_num} / {total_pages} 页...")
+            logger.info(f"[*] [OCR 识别中] 正在转录第 {page_num} / {total_pages} 页...")
             # 150 DPI 兼顾识别高精度与性能
             pix = page.get_pixmap(dpi=150)
             img_bytes = pix.tobytes("png")
@@ -252,7 +253,7 @@ class DocumentParser:
         try:
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump([l.model_dump() for l in lines], f, ensure_ascii=False, indent=2)
-            print(f"[*] [OCR 缓存落盘] 已成功缓存 {len(lines)} 行转录结果至本地，下次秒级加载！")
+            logger.info(f"[*] [OCR 缓存落盘] 已成功缓存 {len(lines)} 行转录结果至本地，下次秒级加载！")
         except Exception:
             pass
 

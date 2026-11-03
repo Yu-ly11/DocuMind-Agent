@@ -20,6 +20,7 @@ from rank_bm25 import BM25Okapi
 import jieba
 from dotenv import load_dotenv
 from openai import OpenAI
+from src.config import call_with_retry, logger
 from src.schemas import VerificationStatus
 
 # 确保项目根目录在 sys.path
@@ -74,9 +75,11 @@ class BGE3EmbeddingFunction(EmbeddingFunction):
 
     def __call__(self, input: Documents) -> Embeddings:
         """ChromaDB 会自动把文本清单传给这个方法"""
-        response = self.client.embeddings.create(
+        response = call_with_retry(
+            self.client.embeddings.create,
             model=self.model,
-            input=input
+            input=input,
+            timeout=60
         )
         return [item.embedding for item in response.data]
 
@@ -131,7 +134,7 @@ class HybridRetriever:
         
         if collection_name in existing_collections:
             # 命中磁盘缓存！直接秒级复用，0 Token 浪费
-            print(f"[*] [CACHE] 命中本地持久化向量缓存 (Collection: {collection_name})，跳过切分与 Embedding 生成！")
+            logger.info(f"[*] [CACHE] 命中本地持久化向量缓存 (Collection: {collection_name})，跳过切分与 Embedding 生成！")
             self.collection = self.chroma_client.get_collection(
                 name=collection_name, 
                 embedding_function=self.embedding_fn
@@ -146,7 +149,7 @@ class HybridRetriever:
         else:
             # 🆕 首次遇到该合同：执行切分、计算向量并持久化落盘
             if use_parent_child:
-                print(f"[*] 首次入库新合同，正在构建【父子块索引 (Small-to-Big)】(指纹: {self.doc_hash})...")
+                logger.info(f"[*] 首次入库新合同，正在构建【父子块索引 (Small-to-Big)】(指纹: {self.doc_hash})...")
                 parent_chunks = parent_child_chunking(
                     full_text,
                     parent_chunk_size=700,
@@ -181,9 +184,9 @@ class HybridRetriever:
                     metadatas=chunk_metas,
                     ids=chunk_ids
                 )
-                print(f"[*] 父子块持久化落盘成功！共管理 {len(parent_chunks)} 个父块，{len(self.chunks)} 个子切片。")
+                logger.info(f"[*] 父子块持久化落盘成功！共管理 {len(parent_chunks)} 个父块，{len(self.chunks)} 个子切片。")
             else:
-                print(f"[*] 首次入库新合同，正在切分并调用 BGE-M3 向量化 (指纹: {self.doc_hash})...")
+                logger.info(f"[*] 首次入库新合同，正在切分并调用 BGE-M3 向量化 (指纹: {self.doc_hash})...")
                 self.chunks = recursive_semantic_chunking(full_text, chunk_size=chunk_size, overlap=overlap)
                 if not self.chunks:
                     self.chunks = [full_text]
@@ -197,7 +200,7 @@ class HybridRetriever:
                     documents=self.chunks,
                     ids=chunk_ids
                 )
-                print(f"[*] 持久化落盘成功！共入库 {len(self.chunks)} 个向量切片。")
+                logger.info(f"[*] 持久化落盘成功！共入库 {len(self.chunks)} 个向量切片。")
 
         # 4. 构建 BM25 词频索引
         tokenized_corpus = [tokenize(c) for c in self.chunks]
@@ -275,7 +278,7 @@ class HybridRetriever:
             self.last_retrieval_mode = "hybrid_rerank"
             return self._resolve_parents(reranked, return_parent, top_k)
         except Exception as e:
-            print(f"[警告] Reranker 服务异常，自动降级为 RRF 粗排结果: {e}")
+            logger.warning(f"[警告] Reranker 服务异常，自动降级为 RRF 粗排结果: {e}")
             self.last_retrieval_mode = "hybrid_rrf"
             return self._resolve_parents(rough_ranked[:top_k], return_parent, top_k)
 

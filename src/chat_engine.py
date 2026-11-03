@@ -9,7 +9,6 @@ import time
 import sqlite3
 from pathlib import Path
 from typing import List, Dict, Any, Generator, Tuple, Optional
-from openai import OpenAI
 from dotenv import load_dotenv
 
 # 确保项目根目录在 sys.path
@@ -17,6 +16,7 @@ root_dir = str(Path(__file__).resolve().parent.parent)
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 
+from src.config import get_llm_client, logger
 from src.rag.hybrid_retriever import HybridRetriever
 from src.schemas import format_line_range
 
@@ -71,11 +71,7 @@ class ContractChatEngine:
 
     def __init__(self, retriever: HybridRetriever):
         self.retriever = retriever
-        self.client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            base_url=os.getenv("OPENAI_BASE_URL")
-        )
-        self.model = os.getenv("MODEL_NAME")
+        self.provider, self.client, self.model = get_llm_client()
 
     def query(
         self, 

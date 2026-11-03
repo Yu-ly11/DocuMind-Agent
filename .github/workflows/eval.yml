@@ -1,0 +1,86 @@
+name: DocuMind CI & Evals Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      full_eval:
+        description: 'Run full 30-sample generation evaluation with LLM judge'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  unit-tests-and-retrieval-eval:
+    name: Unit Tests & Lightweight Retrieval Eval
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run Core Unit Tests
+        run: |
+          pytest tests/test_pdf_parser.py tests/test_evidence_anchor.py tests/test_api.py -v
+
+      - name: Run Lightweight Retrieval Evaluation
+        run: |
+          python evals/eval_rag.py --retrieval-only --output evals/reports/ci_retrieval_report.md
+
+      - name: Archive Retrieval Evaluation Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: retrieval-eval-report
+          path: evals/reports/ci_retrieval_report.md
+
+  full-eval:
+    name: Full End-to-End LLM Generation Evaluation
+    needs: unit-tests-and-retrieval-eval
+    if: github.event_name == 'workflow_dispatch' && inputs.full_eval == true
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+      MODEL_NAME: ${{ secrets.MODEL_NAME }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Full 30-sample Evaluation Pipeline
+        run: |
+          python evals/eval_rag.py --output evals/reports/ci_full_eval_report.md
+
+      - name: Archive Full Evaluation Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: full-eval-report
+          path: evals/reports/ci_full_eval_report.md
